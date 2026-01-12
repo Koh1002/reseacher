@@ -1,265 +1,230 @@
-# 🤖 AI論文要約エージェント / AI Paper Summarizer Agent
+# 🏛️ Multi-Agent Analysis Council
 
-最新の生成AI論文を自動的に調査・要約・図解する知的エージェントシステム
+マルチエージェントによるデータ分析議会のデモWebアプリケーション
 
-An intelligent agent system that automatically researches, summarizes, and visualizes the latest generative AI papers.
+## 概要
 
-![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
-![Flask](https://img.shields.io/badge/Flask-3.0.0-green.svg)
-![Claude](https://img.shields.io/badge/Claude-API-purple.svg)
-![arXiv](https://img.shields.io/badge/arXiv-API-red.svg)
+このアプリケーションは、複数のAIエージェントが協調して購買データを分析し、議論を通じて洞察を導き出すプロセスを可視化するデモです。
 
-## 🌟 特徴 / Features
+### 特徴
 
-### 日本語
-- 📚 **arXiv統合**: arXiv APIから最新のAI論文を自動取得
-- 🤖 **AI要約**: Claude AIを使用した高品質な論文要約
-- 📊 **自動図解**: Mermaidを使用した論文のアーキテクチャ図の自動生成
-- 🔍 **高度な検索**: キーワード、カテゴリ、日付による柔軟な検索
-- 🎨 **モダンなUI**: レスポンシブでダークテーマのWebインターフェース
-- 🚀 **REST API**: 簡単に統合できるRESTful API
-- 🌐 **多言語対応**: 日本語での分かりやすい解説
+- **マルチエージェントシステム**: 議長(Chair)と複数の専門アナリストが協調して分析
+- **データ保護設計**: エージェント間では生データを共有せず、抽象化された「エビデンスカード」のみを共有
+- **ブラウザ内分析**: DuckDB-Wasmを使用してブラウザ内でSQLクエリを実行
+- **リアルタイム可視化**: 議会の進行状況をリアルタイムで表示
+- **GitHub Pages対応**: 静的サイトとしてデプロイ可能
 
-### English
-- 📚 **arXiv Integration**: Automatically fetches latest AI papers from arXiv API
-- 🤖 **AI Summarization**: High-quality paper summaries using Claude AI
-- 📊 **Auto-Diagramming**: Automatic architecture diagram generation using Mermaid
-- 🔍 **Advanced Search**: Flexible search by keywords, categories, and dates
-- 🎨 **Modern UI**: Responsive web interface with dark theme
-- 🚀 **REST API**: Easy-to-integrate RESTful API
-- 🌐 **Multilingual**: Clear explanations in Japanese
+## アーキテクチャ
 
-## 🏗️ アーキテクチャ / Architecture
-
-```mermaid
-graph TD
-    A[Web UI] --> B[Flask API]
-    B --> C[arXiv Fetcher]
-    B --> D[Paper Summarizer]
-    C --> E[arXiv API]
-    D --> F[Claude API]
-    D --> G[Mermaid Diagram Generator]
-
-    style A fill:#6366f1
-    style B fill:#8b5cf6
-    style D fill:#ec4899
-    style F fill:#10b981
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        User Interface                        │
+├──────────────┬────────────────────────┬────────────────────┤
+│ Agent Panel  │    Timeline Panel      │    Card Panel      │
+│ (左)         │    (中央)              │    (右)            │
+├──────────────┴────────────────────────┴────────────────────┤
+│                     State Management (Zustand)              │
+├─────────────────────────────────────────────────────────────┤
+│                   Workflow Orchestrator                     │
+├──────────────┬────────────────────────┬────────────────────┤
+│    Chair     │      Analysts          │   DuckDB-Wasm      │
+│   Agent      │  (Growth, Segment,     │   (Data Engine)    │
+│              │   Basket, Seasonality) │                    │
+└──────────────┴────────────────────────┴────────────────────┘
 ```
 
-## 📋 前提条件 / Prerequisites
+## エージェント構成
 
-- Python 3.8以上 / Python 3.8+
-- Anthropic API Key (Claude AI)
-- インターネット接続 / Internet connection
+| エージェント | 役割 |
+|------------|------|
+| 👔 Chair | 議会の進行、計画立案、最終レポート生成 |
+| 📈 Growth Analyst | 売上トレンド、成長指標の分析 |
+| 👥 Segment Analyst | 顧客セグメントの分析 |
+| 🛒 Basket Analyst | バスケット構成、併買パターンの分析 |
+| 📅 Seasonality Analyst | 季節性、曜日パターンの分析 |
 
-## 🚀 セットアップ / Setup
+## ワークフロー状態機械
 
-### 1. リポジトリのクローン / Clone the repository
-
-```bash
-git clone <your-repo-url>
-cd reseacher
+```
+IDLE → PLANNING → ISSUE_DECOMPOSE → ANALYZING → COUNCIL → ITERATE → FINALIZE → DONE
+                                                    ↑         │
+                                                    └─────────┘ (次ラウンドへ)
 ```
 
-### 2. 依存関係のインストール / Install dependencies
+## コア概念
 
-```bash
-pip install -r requirements.txt
-```
+### EvidenceCard（エビデンスカード）
 
-### 3. 環境変数の設定 / Configure environment variables
+エージェント間で共有される分析結果の抽象化された形式：
 
-`.env`ファイルを作成して、Anthropic API Keyを設定します:
-
-Create a `.env` file and set your Anthropic API Key:
-
-```bash
-cp .env.example .env
-# Edit .env and add your API key
-```
-
-`.env`の内容 / Contents of `.env`:
-```
-ANTHROPIC_API_KEY=your_actual_api_key_here
-```
-
-### 4. アプリケーションの起動 / Start the application
-
-```bash
-python app.py
-```
-
-アプリケーションは `http://localhost:5000` で起動します。
-
-The application will start at `http://localhost:5000`.
-
-## 📖 使い方 / Usage
-
-### Webインターフェース / Web Interface
-
-1. ブラウザで `http://localhost:5000` を開く
-2. 検索ボックスにキーワードを入力（例: "diffusion model", "GPT", "transformer"）
-3. 「検索」ボタンをクリック、または「最新論文」ボタンで最新の論文を取得
-4. 各論文カードの「要約する」ボタンをクリックして詳細な要約と図を表示
-
-### API エンドポイント / API Endpoints
-
-#### 論文検索 / Search Papers
-```bash
-GET /api/search?query=generative%20AI&max_results=10
-```
-
-#### 最新論文の取得 / Get Latest Papers
-```bash
-GET /api/latest?max_results=10
-```
-
-#### カテゴリ別検索 / Search by Category
-```bash
-GET /api/category/cs.AI?max_results=10
-```
-
-利用可能なカテゴリ / Available categories:
-- `cs.AI` - Artificial Intelligence
-- `cs.LG` - Machine Learning
-- `cs.CV` - Computer Vision
-- `cs.CL` - Computation and Language (NLP)
-
-#### 論文の要約 / Summarize a Paper
-```bash
-POST /api/summarize
-Content-Type: application/json
-
-{
-  "paper": {
-    "title": "Paper Title",
-    "authors": ["Author 1", "Author 2"],
-    "summary": "Abstract text...",
-    "published": "2024-01-01",
-    "pdf_url": "https://arxiv.org/pdf/..."
-  }
+```typescript
+interface EvidenceCard {
+  id: string;
+  author_agent: string;
+  claim: string;              // 主張/観察
+  method: string;             // 検証方法
+  query_fingerprint: string;  // クエリのハッシュ（SQL全文ではない）
+  metrics: Metric[];          // 集計指標
+  segment_def: string;        // セグメント定義
+  timeframe: Timeframe;       // 分析期間
+  chart_spec?: ChartSpec;     // 可視化仕様
+  confidence: 'low' | 'mid' | 'high';
+  caveats: string[];          // 注意事項
 }
 ```
 
-#### 複数論文の要約 / Summarize Multiple Papers
-```bash
-POST /api/summarize-multiple
-Content-Type: application/json
+### 生データ保護
 
-{
-  "papers": [
-    { "title": "...", "summary": "..." },
-    { "title": "...", "summary": "..." }
-  ]
-}
-```
+エージェント間で以下は**共有禁止**：
+- 生の行データ
+- 個別のmember_id一覧
+- transaction_id一覧
+- その他、再識別につながる情報
 
-#### 論文の比較分析 / Compare Papers
-```bash
-POST /api/compare
-Content-Type: application/json
+## セットアップ
 
-{
-  "papers": [
-    { "title": "...", "summary": "..." },
-    { "title": "...", "summary": "..." }
-  ]
-}
-```
+### 必要環境
 
-## 🧪 テスト / Testing
+- Node.js 18以上
+- npm または yarn
 
-個別モジュールのテスト:
-
-Test individual modules:
+### インストール
 
 ```bash
-# arXiv Fetcherのテスト
-python arxiv_fetcher.py
+# 依存パッケージのインストール
+npm install
 
-# Paper Summarizerのテスト
-python paper_summarizer.py
+# 開発サーバーの起動
+npm run dev
 ```
 
-## 📁 プロジェクト構造 / Project Structure
+### ビルド
 
-```
-reseacher/
-├── app.py                  # Flask application
-├── arxiv_fetcher.py        # arXiv API integration
-├── paper_summarizer.py     # AI summarization agent
-├── requirements.txt        # Python dependencies
-├── .env.example           # Environment variables template
-├── .gitignore            # Git ignore file
-├── README.md             # This file
-├── templates/
-│   └── index.html        # Main web page
-└── static/
-    ├── css/
-    │   └── style.css     # Styles
-    └── js/
-        └── app.js        # Frontend JavaScript
+```bash
+# 本番ビルド
+npm run build
+
+# ビルド結果のプレビュー
+npm run preview
 ```
 
-## 🔧 設定 / Configuration
+## モード
 
-### 環境変数 / Environment Variables
+### DEMOモード（デフォルト）
 
-| 変数名 / Variable | 説明 / Description | デフォルト / Default |
-|-------------------|-------------------|---------------------|
-| `ANTHROPIC_API_KEY` | Claude API key | (required) |
-| `PORT` | Server port | 5000 |
-| `DEBUG` | Debug mode | False |
+- ルールベースのエージェント応答
+- ローカルのサンプルデータを使用
+- LLM APIキー不要
+- GitHub Pagesで動作
 
-### カスタマイズ / Customization
+### DEVモード（将来実装予定）
 
-- **検索クエリ**: `arxiv_fetcher.py`で検索クエリをカスタマイズ
-- **要約プロンプト**: `paper_summarizer.py`でプロンプトを調整
-- **UIテーマ**: `static/css/style.css`でカラーテーマを変更
+- 実際のLLM APIを使用
+- ローカル開発環境でのみ動作
+- `.env`ファイルでAPIキーを設定
 
-## 🎨 UIスクリーンショット / UI Screenshots
+## データ
 
-### メイン画面 / Main Screen
-- 🔍 検索バー with キーワード入力
-- 🏷️ カテゴリクイックボタン (AI, ML, CV, NLP)
-- 📋 論文リスト with カード表示
+### サンプルデータ形式
 
-### 要約モーダル / Summary Modal
-- 📝 構造化された要約 (概要、主な貢献、技術的アプローチ、重要性)
-- 📊 Mermaidダイアグラム (アーキテクチャ図)
-- 🔗 PDF リンク
+`public/data/purchase_history.csv`:
 
-## 🤝 貢献 / Contributing
+| カラム | 型 | 説明 |
+|-------|-----|------|
+| purchase_date | DATE | 購入日 (YYYY-MM-DD) |
+| member_id | STRING | 匿名化された会員ID |
+| store | STRING | 店舗名 (summit/tomods) |
+| category | STRING | 商品カテゴリ |
+| product | STRING | 商品名 |
+| qty | NUMBER | 数量 |
+| amount | NUMBER | 金額 |
+| transaction_id | STRING | 取引ID |
 
-プルリクエストを歓迎します！
+### データの差し替え
 
-Pull requests are welcome!
+1. `public/data/purchase_history.csv`を新しいCSVで置き換え
+2. 上記のカラム形式に従う
+3. 開発サーバーを再起動
 
-1. このリポジトリをフォーク
-2. フィーチャーブランチを作成 (`git checkout -b feature/amazing-feature`)
-3. 変更をコミット (`git commit -m 'Add amazing feature'`)
-4. ブランチにプッシュ (`git push origin feature/amazing-feature`)
-5. プルリクエストを作成
+## GitHub Pagesへのデプロイ
 
-## 📝 ライセンス / License
+### 自動デプロイ
 
-このプロジェクトはMITライセンスの下で公開されています。
+1. GitHubリポジトリの Settings > Pages を開く
+2. Source を "GitHub Actions" に設定
+3. mainブランチにプッシュすると自動的にデプロイ
 
-This project is licensed under the MIT License.
+### 手動デプロイ
 
-## 🙏 謝辞 / Acknowledgments
+```bash
+# ビルド
+npm run build
 
-- [arXiv](https://arxiv.org/) - 論文データベース / Paper database
-- [Anthropic Claude](https://www.anthropic.com/) - AI要約エンジン / AI summarization engine
-- [Mermaid](https://mermaid.js.org/) - ダイアグラム生成 / Diagram generation
-- [Flask](https://flask.palletsprojects.com/) - Webフレームワーク / Web framework
+# distフォルダをgh-pagesブランチにデプロイ
+# (例: gh-pages npmパッケージを使用)
+npx gh-pages -d dist
+```
 
-## 📞 サポート / Support
+## 技術スタック
 
-問題が発生した場合は、GitHubのIssuesで報告してください。
+- **フレームワーク**: React 19 + TypeScript
+- **ビルドツール**: Vite
+- **状態管理**: Zustand
+- **データ分析**: DuckDB-Wasm
+- **チャート**: Chart.js + react-chartjs-2
+- **アニメーション**: Framer Motion
+- **スタイリング**: Tailwind CSS
 
-If you encounter any issues, please report them on GitHub Issues.
+## ディレクトリ構成
 
----
+```
+src/
+├── agents/           # エージェント実装
+│   ├── protocol.ts   # エージェントプロトコル定義
+│   ├── demoAgents.ts # DEMOモードの実装
+│   └── workflow.ts   # ワークフロー状態機械
+├── components/       # UIコンポーネント
+│   ├── AgentPanel.tsx
+│   ├── TimelinePanel.tsx
+│   ├── CardPanel.tsx
+│   ├── ChartDisplay.tsx
+│   └── ReportView.tsx
+├── store/            # 状態管理
+│   └── councilStore.ts
+├── types/            # TypeScript型定義
+│   └── index.ts
+├── utils/            # ユーティリティ
+│   └── duckdb.ts     # DuckDB-Wasm統合
+├── App.tsx           # メインコンポーネント
+├── main.tsx          # エントリーポイント
+└── index.css         # グローバルスタイル
+```
 
-Made with ❤️ for AI researchers and enthusiasts
+## 拡張ポイント
+
+### 実LLMの統合
+
+1. `src/agents/llmClient.ts`を作成
+2. DEVモード用のプロンプトテンプレートを定義
+3. `demoAgents.ts`と同じインターフェースで実装
+4. `workflow.ts`でモードに応じて切り替え
+
+### 新しいアナリストの追加
+
+1. `src/store/councilStore.ts`の`DEFAULT_AGENTS`に追加
+2. `src/agents/demoAgents.ts`の`ANALYSIS_TEMPLATES`に追加
+3. `src/utils/duckdb.ts`の`ANALYSIS_QUERIES`に必要なクエリを追加
+
+### より高度なアニメーション
+
+1. `src/components/TimelinePanel.tsx`でFramer Motionの設定を調整
+2. メッセージの出現アニメーションをカスタマイズ
+3. スクロールアニメーションの追加
+
+## ライセンス
+
+MIT License
+
+## 貢献
+
+Issues と Pull Requests は歓迎です。
