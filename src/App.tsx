@@ -10,6 +10,7 @@ import { AgentPanel } from './components/AgentPanel';
 import { TimelinePanel } from './components/TimelinePanel';
 import { CardPanel } from './components/CardPanel';
 import { ReportView } from './components/ReportView';
+import { APIKeyInput } from './components/APIKeyInput';
 
 // Sample analysis topics for quick start
 const SAMPLE_TOPICS = [
@@ -22,6 +23,7 @@ const SAMPLE_TOPICS = [
 function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
   const [topic, setTopic] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const config = useCouncilStore((s) => s.config);
 
   const handleStart = async () => {
     if (!topic.trim()) return;
@@ -41,8 +43,13 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
           🏛️ Multi-Agent Analysis Council
         </h1>
         <p className="text-gray-600">
-          AIエージェントによるデータ分析議会デモ
+          AIエージェントによるデータ分析議会
         </p>
+      </div>
+
+      {/* API Key Input */}
+      <div className="mb-6">
+        <APIKeyInput />
       </div>
 
       <div className="bg-white rounded-xl shadow-lg p-6">
@@ -78,7 +85,16 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
                 データ読み込み中...
               </span>
             ) : (
-              '🚀 議会を開始'
+              <span className="flex items-center justify-center gap-2">
+                🚀 議会を開始
+                <span className={`px-2 py-0.5 rounded text-xs ${
+                  config.mode === 'DEV'
+                    ? 'bg-green-500/20 text-green-100'
+                    : 'bg-white/20'
+                }`}>
+                  {config.mode}モード
+                </span>
+              </span>
             )}
           </button>
         </div>
@@ -102,18 +118,22 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
 
       {/* Info cards */}
       <div className="mt-8 grid grid-cols-2 gap-4">
-        <div className="bg-white rounded-lg p-4 shadow">
+        <div className={`rounded-lg p-4 shadow ${
+          config.mode === 'DEMO' ? 'bg-blue-50 border-2 border-blue-200' : 'bg-white'
+        }`}>
           <h3 className="font-semibold text-sm mb-2">📊 DEMOモード</h3>
           <p className="text-xs text-gray-600">
             ルールベースのエージェントが購買データを分析します。
-            ブラウザ内でDuckDB-Wasmを使用して集計を実行します。
+            APIキー不要でお試しいただけます。
           </p>
         </div>
-        <div className="bg-white rounded-lg p-4 shadow">
-          <h3 className="font-semibold text-sm mb-2">🔒 データ保護</h3>
+        <div className={`rounded-lg p-4 shadow ${
+          config.mode === 'DEV' ? 'bg-green-50 border-2 border-green-200' : 'bg-white'
+        }`}>
+          <h3 className="font-semibold text-sm mb-2">🤖 DEVモード</h3>
           <p className="text-xs text-gray-600">
-            エージェント間では生データを共有しません。
-            抽象化されたエビデンスカードのみが共有されます。
+            GPT/Claude/Geminiが実際に分析・議論を行います。
+            APIキーを入力すると自動で切り替わります。
           </p>
         </div>
       </div>

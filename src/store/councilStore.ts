@@ -3,6 +3,7 @@
 // =============================================
 
 import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
 import type {
   Agent,
   AgentRole,
@@ -16,6 +17,20 @@ import type {
   Message,
   WorkflowState,
 } from '../types';
+import type { LLMProvider } from '../utils/llmClient';
+
+// API Keys configuration
+export interface APIKeys {
+  openai: string;
+  anthropic: string;
+  google: string;
+}
+
+// Agent LLM assignment
+export interface AgentLLMAssignment {
+  agentId: string;
+  provider: LLMProvider;
+}
 
 // Generate unique IDs
 const generateId = () => Math.random().toString(36).substring(2, 11);
@@ -53,6 +68,16 @@ interface CouncilState {
   // Configuration
   config: AppConfig;
   setConfig: (config: Partial<AppConfig>) => void;
+
+  // API Keys
+  apiKeys: APIKeys;
+  setAPIKeys: (keys: Partial<APIKeys>) => void;
+  clearAPIKeys: () => void;
+
+  // Agent LLM assignments
+  agentLLMAssignments: Map<string, LLMProvider>;
+  setAgentLLMAssignments: (assignments: Map<string, LLMProvider>) => void;
+  getAgentProvider: (agentId: string) => LLMProvider | undefined;
 
   // Session
   session: CouncilSession | null;
@@ -94,25 +119,59 @@ interface CouncilState {
   getOpenIssues: () => Issue[];
 }
 
-export const useCouncilStore = create<CouncilState>((set, get) => ({
-  // Initial configuration
-  config: {
-    mode: 'DEMO' as LLMMode,
-    max_rounds: 2,
-    animation_enabled: true,
-    animation_speed: 500,
-  },
+export const useCouncilStore = create<CouncilState>()(
+  persist(
+    (set, get) => ({
+      // Initial configuration
+      config: {
+        mode: 'DEMO' as LLMMode,
+        max_rounds: 2,
+        animation_enabled: true,
+        animation_speed: 500,
+      },
 
-  setConfig: (updates) =>
-    set((state) => ({
-      config: { ...state.config, ...updates },
-    })),
+      setConfig: (updates) =>
+        set((state) => ({
+          config: { ...state.config, ...updates },
+        })),
 
-  // Session state
-  session: null,
-  isDataLoaded: false,
+      // API Keys
+      apiKeys: {
+        openai: '',
+        anthropic: '',
+        google: '',
+      },
 
-  setDataLoaded: (loaded) => set({ isDataLoaded: loaded }),
+      setAPIKeys: (keys) =>
+        set((state) => ({
+          apiKeys: { ...state.apiKeys, ...keys },
+          config: {
+            ...state.config,
+            mode: (keys.openai || keys.anthropic || keys.google ||
+                   state.apiKeys.openai || state.apiKeys.anthropic || state.apiKeys.google)
+              ? 'DEV' : 'DEMO',
+          },
+        })),
+
+      clearAPIKeys: () =>
+        set({
+          apiKeys: { openai: '', anthropic: '', google: '' },
+          config: { ...get().config, mode: 'DEMO' },
+        }),
+
+      // Agent LLM assignments
+      agentLLMAssignments: new Map(),
+
+      setAgentLLMAssignments: (assignments) =>
+        set({ agentLLMAssignments: assignments }),
+
+      getAgentProvider: (agentId) => get().agentLLMAssignments.get(agentId),
+
+      // Session state
+      session: null,
+      isDataLoaded: false,
+
+      setDataLoaded: (loaded) => set({ isDataLoaded: loaded }),
 
   startSession: (topic) => {
     const agents: Agent[] = DEFAULT_AGENTS.map((a) => ({
@@ -273,15 +332,24 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
       session: state.session ? { ...state.session, report } : null,
     })),
 
-  // Selectors
-  getAgentById: (id) => get().session?.agents.find((a) => a.id === id),
-  getAgentByRole: (role) => get().session?.agents.find((a) => a.role === role),
-  getCardById: (id) => get().session?.cards.find((c) => c.id === id),
-  getIssueById: (id) => get().session?.issues.find((i) => i.id === id),
-  getCardsByAgent: (agentId) =>
-    get().session?.cards.filter((c) => c.author_agent === agentId) ?? [],
-  getMessagesByAgent: (agentId) =>
-    get().session?.messages.filter((m) => m.speaker === agentId) ?? [],
-  getOpenIssues: () =>
-    get().session?.issues.filter((i) => i.status !== 'resolved') ?? [],
-}));
+      // Selectors
+      getAgentById: (id) => get().session?.agents.find((a) => a.id === id),
+      getAgentByRole: (role) => get().session?.agents.find((a) => a.role === role),
+      getCardById: (id) => get().session?.cards.find((c) => c.id === id),
+      getIssueById: (id) => get().session?.issues.find((i) => i.id === id),
+      getCardsByAgent: (agentId) =>
+        get().session?.cards.filter((c) => c.author_agent === agentId) ?? [],
+      getMessagesByAgent: (agentId) =>
+        get().session?.messages.filter((m) => m.speaker === agentId) ?? [],
+      getOpenIssues: () =>
+        get().session?.issues.filter((i) => i.status !== 'resolved') ?? [],
+    }),
+    {
+      name: 'council-storage',
+      partialize: (state) => ({
+        apiKeys: state.apiKeys,
+        config: state.config,
+      }),
+    }
+  )
+);
