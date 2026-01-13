@@ -35,12 +35,20 @@ const ROLE_ICONS: Record<string, string> = {
   price_analyst: '💰',
 };
 
+const PROVIDER_COLORS: Record<string, { bg: string; text: string; label: string }> = {
+  openai: { bg: 'bg-green-100', text: 'text-green-700', label: 'GPT' },
+  anthropic: { bg: 'bg-orange-100', text: 'text-orange-700', label: 'Claude' },
+  google: { bg: 'bg-blue-100', text: 'text-blue-700', label: 'Gemini' },
+};
+
 interface AgentCardProps {
   agent: Agent;
+  provider?: string;
 }
 
-function AgentCard({ agent }: AgentCardProps) {
+function AgentCard({ agent, provider }: AgentCardProps) {
   const isActive = agent.status !== 'idle' && agent.status !== 'done';
+  const providerStyle = provider ? PROVIDER_COLORS[provider] : null;
 
   return (
     <motion.div
@@ -54,7 +62,14 @@ function AgentCard({ agent }: AgentCardProps) {
       <div className="flex items-center gap-2 mb-2">
         <span className="text-xl">{ROLE_ICONS[agent.role] || '🤖'}</span>
         <div className="flex-1 min-w-0">
-          <h3 className="font-semibold text-sm truncate">{agent.name}</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="font-semibold text-sm truncate">{agent.name}</h3>
+            {providerStyle && (
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${providerStyle.bg} ${providerStyle.text}`}>
+                {providerStyle.label}
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-1.5">
             <span
               className={`w-2 h-2 rounded-full ${STATUS_COLORS[agent.status]} ${
@@ -96,6 +111,8 @@ function AgentCard({ agent }: AgentCardProps) {
 
 export function AgentPanel() {
   const session = useCouncilStore((s) => s.session);
+  const agentLLMAssignments = useCouncilStore((s) => s.agentLLMAssignments);
+  const config = useCouncilStore((s) => s.config);
 
   if (!session) {
     return (
@@ -108,6 +125,10 @@ export function AgentPanel() {
   const chair = session.agents.find((a) => a.role === 'chair');
   const analysts = session.agents.filter((a) => a.role !== 'chair');
 
+  const getProvider = (agentId: string): string | undefined => {
+    return agentLLMAssignments.get(agentId);
+  };
+
   return (
     <div className="h-full flex flex-col p-4 overflow-hidden">
       <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
@@ -115,13 +136,20 @@ export function AgentPanel() {
         <span>議会メンバー</span>
       </h2>
 
+      {/* Mode indicator */}
+      <div className={`mb-3 px-3 py-1.5 rounded-lg text-xs font-medium ${
+        config.mode === 'DEV' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+      }`}>
+        {config.mode === 'DEV' ? '🤖 生成AIモード' : '📊 デモモード'}
+      </div>
+
       {/* Chair */}
       {chair && (
         <div className="mb-4">
           <h3 className="text-xs font-semibold text-gray-500 mb-2 uppercase">
             議長
           </h3>
-          <AgentCard agent={chair} />
+          <AgentCard agent={chair} provider={getProvider(chair.id)} />
         </div>
       )}
 
@@ -132,7 +160,7 @@ export function AgentPanel() {
         </h3>
         <div className="space-y-2">
           {analysts.map((agent) => (
-            <AgentCard key={agent.id} agent={agent} />
+            <AgentCard key={agent.id} agent={agent} provider={getProvider(agent.id)} />
           ))}
         </div>
       </div>
