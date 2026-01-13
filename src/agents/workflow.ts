@@ -302,15 +302,28 @@ export class WorkflowOrchestrator {
    */
   private async runAnalyzing(animationSpeed: number): Promise<WorkflowState> {
     const store = useCouncilStore.getState();
-    const session = store.session!;
+
+    // Get fresh session to ensure we have all issues from ISSUE_DECOMPOSE phase
+    const session = useCouncilStore.getState().session;
+    if (!session) {
+      console.error('[Workflow] No session found in ANALYZING phase');
+      return 'ERROR';
+    }
+
     const analysts = session.agents.filter((a) => a.role !== 'chair');
+
+    console.log(`[Workflow] ANALYZING phase: ${session.issues.length} issues to analyze`);
 
     for (const analyst of analysts) {
       try {
         store.setAgentStatus(analyst.id, 'analyzing');
         store.setAgentProgress(analyst.id, 0);
 
-        const assignedIssues = session.issues.filter((i) => i.assigned_to === analyst.id);
+        // Get fresh issues from store
+        const currentSession = useCouncilStore.getState().session;
+        const assignedIssues = (currentSession?.issues || []).filter((i) => i.assigned_to === analyst.id);
+
+        console.log(`[Workflow] ${analyst.name} has ${assignedIssues.length} assigned issues`);
 
         // Skip if no issues assigned
         if (assignedIssues.length === 0) {
@@ -358,8 +371,11 @@ export class WorkflowOrchestrator {
               continue;
             }
 
+            console.log(`[Workflow] ${analyst.name} generated ${cards.length} cards for issue "${issue.title}"`);
+
             for (const card of cards) {
               store.addCard(card);
+              console.log(`[Workflow] Added card: "${card.claim.substring(0, 50)}..." with chart: ${card.chart_spec ? 'yes' : 'no'}`);
 
               // Generate message about findings with error handling
               let findingsMessage: string;
@@ -422,18 +438,33 @@ export class WorkflowOrchestrator {
    */
   private async runCouncil(animationSpeed: number): Promise<WorkflowState> {
     const store = useCouncilStore.getState();
-    const session = store.session!;
+
+    // Get fresh session state to ensure we have all cards from ANALYZING phase
+    const session = useCouncilStore.getState().session;
+    if (!session) {
+      console.error('[Workflow] No session found in COUNCIL phase');
+      return 'ERROR';
+    }
+
     const analysts = session.agents.filter((a) => a.role !== 'chair');
+
+    console.log(`[Workflow] COUNCIL phase: ${session.cards.length} cards, ${session.messages.length} messages`);
 
     // Phase 1: Each analyst critiques others' work
     for (const analyst of analysts) {
       try {
         store.setAgentStatus(analyst.id, 'discussing');
 
-        const otherCards = session.cards.filter((c) => c.author_agent !== analyst.id);
+        // Get fresh cards from store
+        const currentSession = useCouncilStore.getState().session;
+        const allCards = currentSession?.cards || [];
+        const otherCards = allCards.filter((c) => c.author_agent !== analyst.id);
+
+        console.log(`[Workflow] ${analyst.name} reviewing ${otherCards.length} cards from others`);
 
         // Skip if no other cards to critique
         if (otherCards.length === 0) {
+          console.warn(`[Workflow] No cards to critique for ${analyst.name}`);
           store.setAgentStatus(analyst.id, 'waiting');
           continue;
         }
