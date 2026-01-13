@@ -34,12 +34,12 @@ const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
     issueTemplates: [
       {
         title: '売上トレンドの把握',
-        description: '月次・週次での売上推移を分析し、成長傾向を明らかにする',
+        description: '月次での売上推移を分析し、成長傾向を明らかにする',
         why_it_matters: '事業成長の方向性と速度を理解することで、戦略的意思決定の基盤を作る',
         hypotheses: [
           '売上は安定的に成長している',
           '特定の月に売上が集中している',
-          '曜日による売上変動がある',
+          '季節変動のパターンがある',
         ],
         queryKey: 'monthlyTrend',
       },
@@ -50,6 +50,7 @@ const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
         hypotheses: [
           '店舗間で顧客単価に差がある',
           '特定店舗に顧客が偏っている',
+          '店舗ごとに売れ筋部門が異なる',
         ],
         queryKey: 'storePerformance',
       },
@@ -63,11 +64,21 @@ const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
         description: '購買頻度に基づいて顧客をセグメント化し、各セグメントの特性を分析',
         why_it_matters: 'セグメント別のアプローチを設計し、顧客価値の最大化を図る',
         hypotheses: [
-          'ロイヤル顧客の購買単価は高い',
-          '一回きりの顧客が多数を占める',
-          'セグメント間で購買カテゴリに差がある',
+          'ロイヤル層の購買単価は高い',
+          '新規顧客が多数を占める',
+          'セグメント間で購買頻度に大きな差がある',
         ],
         queryKey: 'customerSegments',
+      },
+      {
+        title: '顧客LTV分析',
+        description: '顧客生涯価値の分布を分析し、高価値顧客の特徴を把握',
+        why_it_matters: '顧客獲得・維持コストの最適化と優良顧客育成施策の立案',
+        hypotheses: [
+          '上位20%の顧客が売上の大半を占める',
+          '高LTV顧客は特定部門の購買率が高い',
+        ],
+        queryKey: 'customerLTV',
       },
     ],
   },
@@ -80,17 +91,18 @@ const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
         why_it_matters: 'クロスセル機会の発見とバスケットサイズ拡大施策の検討',
         hypotheses: [
           'バスケットサイズと購買額は正の相関がある',
-          '特定カテゴリの組み合わせが頻出する',
+          '5点以上購入の顧客は客単価が高い',
         ],
         queryKey: 'basketSize',
       },
       {
-        title: 'カテゴリ併買パターン',
-        description: '同一トランザクションで購入されるカテゴリの組み合わせを分析',
-        why_it_matters: '商品配置やプロモーション設計に活用できる知見を得る',
+        title: '部門併買パターン',
+        description: '同一トランザクションで購入される部門の組み合わせを分析',
+        why_it_matters: '売場配置やプロモーション設計に活用できる知見を得る',
         hypotheses: [
-          '日用品とスナックは一緒に購入されやすい',
-          '化粧品は単独購入が多い',
+          '青果と精肉は一緒に購入されやすい',
+          'デイリーと加工食品の併買率が高い',
+          '家庭用品は他部門との併買率が低い',
         ],
         queryKey: 'categoryCoPurchase',
       },
@@ -105,19 +117,21 @@ const ANALYSIS_TEMPLATES: AnalysisTemplate[] = [
         why_it_matters: 'シフト計画やプロモーションタイミングの最適化',
         hypotheses: [
           '週末は購買が増加する',
-          '平日と週末でカテゴリ構成が異なる',
+          '平日と週末で購買部門に差がある',
+          '金曜日は週間で最も売上が高い',
         ],
         queryKey: 'dayOfWeekPattern',
       },
       {
-        title: '月次売上サイクル',
-        description: '月ごとの売上パターンを分析し、季節性を検出',
-        why_it_matters: '在庫計画と販促計画の精度向上',
+        title: '部門別売上構成分析',
+        description: '各部門の売上構成比と特徴を分析',
+        why_it_matters: '部門ごとの戦略立案と売場面積配分の最適化',
         hypotheses: [
-          '特定月に売上が集中する',
-          '月末に購買が増加する傾向がある',
+          '生鮮三部門（青果・鮮魚・精肉）で売上の過半を占める',
+          '部門によって客単価に大きな差がある',
+          '加工食品は購買頻度が高い',
         ],
-        queryKey: 'monthlyTrend',
+        queryKey: 'salesByCategory',
       },
     ],
   },
@@ -500,12 +514,38 @@ export class DemoAgent {
       }
 
       case 'customerSegments': {
-        const oneTime = results.find((r) => r.segment === 'One-time');
-        const loyal = results.find((r) => r.segment === 'Loyal');
-        if (oneTime && Number(oneTime.customer_count) > Number(loyal?.customer_count || 0) * 2) {
-          return '一回きりの顧客が多く、リピート率向上が課題です。ロイヤル顧客の育成施策を検討すべきです。';
+        const newCustomer = results.find((r) => r.segment === '新規顧客');
+        const loyal = results.find((r) => r.segment === 'ロイヤル層');
+        const totalCustomers = results.reduce((sum, r) => sum + Number(r.customer_count), 0);
+        if (newCustomer) {
+          const newRatio = Math.round((Number(newCustomer.customer_count) / totalCustomers) * 100);
+          if (newRatio > 30) {
+            return `新規顧客が全体の${newRatio}%を占めており、リピート率向上が課題です。ロイヤル層育成施策を検討すべきです。`;
+          }
+        }
+        if (loyal) {
+          const loyalAvgSpent = Math.round(Number(loyal.avg_spent));
+          return `ロイヤル層の平均購買額は${loyalAvgSpent.toLocaleString()}円と高く、優良顧客の維持が重要です。`;
         }
         return '顧客セグメントは比較的バランスが取れていますが、各セグメント向けの施策最適化の余地があります。';
+      }
+
+      case 'customerLTV': {
+        const highLTV = results.find((r) => r.ltv_range === '10万円以上');
+        const totalCustomers = results.reduce((sum, r) => sum + Number(r.customer_count), 0);
+        if (highLTV) {
+          const highRatio = Math.round((Number(highLTV.customer_count) / totalCustomers) * 100);
+          return `高LTV顧客（10万円以上）は全体の${highRatio}%ですが、売上への貢献度は大きいと推測されます。`;
+        }
+        return '顧客LTVの分布を分析しました。上位顧客への重点施策が効果的と考えられます。';
+      }
+
+      case 'salesByCategory': {
+        const sorted = [...results].sort((a, b) => Number(b.revenue) - Number(a.revenue));
+        const top = sorted[0];
+        const totalRevenue = results.reduce((sum, r) => sum + Number(r.revenue), 0);
+        const topRatio = Math.round((Number(top.revenue) / totalRevenue) * 100);
+        return `${top.category}部門が売上トップで全体の${topRatio}%を占めています。生鮮部門の強化が売上向上の鍵です。`;
       }
 
       case 'storePerformance': {
@@ -545,17 +585,21 @@ export class DemoAgent {
   private getSegmentDef(queryKey: keyof typeof ANALYSIS_QUERIES): string {
     switch (queryKey) {
       case 'customerSegments':
-        return '購買回数に基づくセグメント: One-time(1回), Occasional(2-5回), Regular(6-10回), Loyal(11回以上)';
+        return '購買回数に基づくセグメント: 新規顧客(1回), ライト層(2-10回), ミドル層(11-30回), ヘビー層(31-60回), ロイヤル層(61回以上)';
+      case 'customerLTV':
+        return '顧客生涯価値（累計購買額）に基づく分布';
       case 'monthlyTrend':
-        return '全顧客・全カテゴリ対象の月次集計';
+        return '全顧客・全部門対象の月次集計';
       case 'storePerformance':
-        return '店舗別の全カテゴリ売上';
+        return '店舗別の全部門売上';
       case 'dayOfWeekPattern':
         return '曜日別の全店舗集計';
       case 'basketSize':
         return 'トランザクション単位でのバスケット分析';
       case 'categoryCoPurchase':
-        return '同一トランザクション内でのカテゴリ併買';
+        return '同一トランザクション内での部門併買';
+      case 'salesByCategory':
+        return '部門別（青果・鮮魚・精肉・加工食品・デイリー・菓子・家庭用品）の売上分析';
       default:
         return '全データ対象';
     }
