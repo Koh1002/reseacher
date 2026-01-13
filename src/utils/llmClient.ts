@@ -105,6 +105,15 @@ export class LLMClient {
     }
 
     const data = await response.json();
+
+    // Validate response structure
+    if (!data.choices || !Array.isArray(data.choices) || data.choices.length === 0) {
+      throw new Error('OpenAI API returned empty choices');
+    }
+    if (!data.choices[0].message?.content) {
+      throw new Error('OpenAI API returned empty message content');
+    }
+
     return {
       content: data.choices[0].message.content,
       provider: 'openai',
@@ -154,6 +163,15 @@ export class LLMClient {
     }
 
     const data = await response.json();
+
+    // Validate response structure
+    if (!data.content || !Array.isArray(data.content) || data.content.length === 0) {
+      throw new Error('Anthropic API returned empty content');
+    }
+    if (!data.content[0].text) {
+      throw new Error('Anthropic API returned empty text');
+    }
+
     return {
       content: data.content[0].text,
       provider: 'anthropic',
@@ -209,8 +227,15 @@ export class LLMClient {
 
     const data = await response.json();
 
-    if (!data.candidates || data.candidates.length === 0) {
+    // Validate response structure
+    if (!data.candidates || !Array.isArray(data.candidates) || data.candidates.length === 0) {
       throw new Error('Google API returned no candidates');
+    }
+    if (!data.candidates[0].content?.parts || !Array.isArray(data.candidates[0].content.parts) || data.candidates[0].content.parts.length === 0) {
+      throw new Error('Google API returned empty content parts');
+    }
+    if (!data.candidates[0].content.parts[0].text) {
+      throw new Error('Google API returned empty text');
     }
 
     return {

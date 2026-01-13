@@ -146,8 +146,15 @@ export class LLMAgent {
   async analyzeIssue(issue: Issue, queryResults: Record<string, any[]>): Promise<EvidenceCard[]> {
     // Prepare data summary for LLM (no raw data, only aggregates)
     const dataSummary = Object.entries(queryResults)
+      .filter(([, results]) => results && results.length > 0)
       .map(([key, results]) => `【${key}】\n${JSON.stringify(results.slice(0, 10), null, 2)}`)
       .join('\n\n');
+
+    // If no data available, return a fallback card
+    if (!dataSummary) {
+      console.warn('[LLMAgent] No query results available, creating fallback card');
+      return [this.createFallbackCard(issue)];
+    }
 
     const messages: LLMMessage[] = [
       { role: 'system', content: this.getSystemPrompt() },
@@ -183,16 +190,36 @@ ${dataSummary}
       const response = await this.client.chat(messages, { temperature: 0.5 });
       const jsonMatch = response.content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
-        throw new Error('JSON not found in response');
+        console.warn('[LLMAgent] JSON not found in response, creating fallback card');
+        return [this.createFallbackCard(issue, queryResults)];
       }
 
-      const parsed = JSON.parse(jsonMatch[0]);
+      let parsed;
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (parseError) {
+        console.warn('[LLMAgent] JSON parse failed, creating fallback card:', parseError);
+        return [this.createFallbackCard(issue, queryResults)];
+      }
 
-      // Get timeframe
-      const timeframeResult = await executeQuery<{ start_date: string; end_date: string }>(
-        ANALYSIS_QUERIES.timeframeSummary
-      );
-      const timeframe = timeframeResult[0] || { start_date: '2024-01-01', end_date: '2024-03-31' };
+      // Validate required fields
+      if (!parsed.claim || typeof parsed.claim !== 'string') {
+        console.warn('[LLMAgent] Invalid claim in response, creating fallback card');
+        return [this.createFallbackCard(issue, queryResults)];
+      }
+
+      // Get timeframe with error handling
+      let timeframe = { start_date: '2024-01-01', end_date: '2024-03-31' };
+      try {
+        const timeframeResult = await executeQuery<{ start_date: string; end_date: string }>(
+          ANALYSIS_QUERIES.timeframeSummary
+        );
+        if (timeframeResult && timeframeResult[0]) {
+          timeframe = timeframeResult[0];
+        }
+      } catch (timeframeError) {
+        console.warn('[LLMAgent] Failed to get timeframe, using default:', timeframeError);
+      }
 
       // Generate chart spec from data
       const chartSpec = this.generateChartSpec(queryResults);
@@ -201,25 +228,69 @@ ${dataSummary}
         id: generateId(),
         author_agent: this.agent.id,
         claim: parsed.claim,
-        method: parsed.method,
+        method: parsed.method || `${issue.title}の分析`,
         query_fingerprint: `LLM分析_${this.agent.role}_${Date.now().toString(36)}`,
-        metrics: parsed.metrics || [],
+        metrics: Array.isArray(parsed.metrics) ? parsed.metrics : [],
         segment_def: `${this.agent.name}による分析`,
         timeframe: {
           from: String(timeframe.start_date).split('T')[0],
           to: String(timeframe.end_date).split('T')[0],
         },
         chart_spec: chartSpec,
-        confidence: parsed.confidence || 'mid',
-        caveats: parsed.caveats || [],
+        confidence: ['low', 'mid', 'high'].includes(parsed.confidence) ? parsed.confidence : 'mid',
+        caveats: Array.isArray(parsed.caveats) ? parsed.caveats : [],
         created_at: new Date().toISOString(),
       };
 
       return [card];
     } catch (error) {
       console.error('[LLMAgent] Error analyzing issue:', error);
-      return [];
+      // Return a fallback card instead of empty array
+      return [this.createFallbackCard(issue, queryResults)];
     }
+  }
+
+  /**
+   * Create a fallback evidence card when LLM fails
+   */
+  private createFallbackCard(issue: Issue, queryResults?: Record<string, any[]>): EvidenceCard {
+    // Extract some basic metrics from query results if available
+    const metrics: { name: string; value: number | string; unit?: string }[] = [];
+    let claim = `${issue.title}の分析を実施しました。`;
+
+    if (queryResults) {
+      const firstResult = Object.entries(queryResults).find(([, v]) => v && v.length > 0);
+      if (firstResult) {
+        const [key, data] = firstResult;
+        metrics.push({ name: 'データ件数', value: data.length, unit: '件' });
+
+        // Try to extract a meaningful claim
+        if (key === 'monthlyTrend' && data.length > 0) {
+          claim = `${data.length}ヶ月分のトレンドデータを分析しました。`;
+        } else if (key === 'storePerformance' && data.length > 0) {
+          claim = `${data.length}店舗のパフォーマンスデータを分析しました。`;
+        } else if (key === 'customerSegments' && data.length > 0) {
+          claim = `${data.length}つの顧客セグメントを分析しました。`;
+        }
+      }
+    }
+
+    return {
+      id: generateId(),
+      author_agent: this.agent.id,
+      claim,
+      method: `${issue.title}の分析（フォールバック）`,
+      query_fingerprint: `fallback_${this.agent.role}_${Date.now().toString(36)}`,
+      metrics,
+      segment_def: `${this.agent.name}による分析`,
+      timeframe: {
+        from: '2024-01-01',
+        to: '2024-03-31',
+      },
+      confidence: 'low' as const,
+      caveats: ['LLM分析が完了しなかったため、限定的な結果です。'],
+      created_at: new Date().toISOString(),
+    };
   }
 
   /**
@@ -484,13 +555,36 @@ export async function executeAnalysisQueries(role: string): Promise<Record<strin
 
   const queries = roleQueryMap[role] || ['totalSales'];
   const results: Record<string, any[]> = {};
+  let successCount = 0;
 
   for (const queryKey of queries) {
     try {
-      const data = await executeQuery(ANALYSIS_QUERIES[queryKey]);
-      results[queryKey] = data;
+      const query = ANALYSIS_QUERIES[queryKey];
+      if (!query) {
+        console.warn(`[executeAnalysisQueries] Query not found: ${queryKey}`);
+        continue;
+      }
+      const data = await executeQuery(query);
+      if (data && Array.isArray(data)) {
+        results[queryKey] = data;
+        successCount++;
+      }
     } catch (error) {
       console.error(`[executeAnalysisQueries] Error executing ${queryKey}:`, error);
+      // Continue with other queries even if one fails
+    }
+  }
+
+  // If no queries succeeded, try a simple fallback query
+  if (successCount === 0) {
+    console.warn(`[executeAnalysisQueries] No queries succeeded for ${role}, trying fallback`);
+    try {
+      const fallbackData = await executeQuery(ANALYSIS_QUERIES.totalSales);
+      if (fallbackData && Array.isArray(fallbackData)) {
+        results['totalSales'] = fallbackData;
+      }
+    } catch (fallbackError) {
+      console.error('[executeAnalysisQueries] Fallback query also failed:', fallbackError);
     }
   }
 

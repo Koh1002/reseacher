@@ -306,67 +306,104 @@ export class WorkflowOrchestrator {
     const analysts = session.agents.filter((a) => a.role !== 'chair');
 
     for (const analyst of analysts) {
-      store.setAgentStatus(analyst.id, 'analyzing');
-      store.setAgentProgress(analyst.id, 0);
+      try {
+        store.setAgentStatus(analyst.id, 'analyzing');
+        store.setAgentProgress(analyst.id, 0);
 
-      const assignedIssues = session.issues.filter((i) => i.assigned_to === analyst.id);
+        const assignedIssues = session.issues.filter((i) => i.assigned_to === analyst.id);
 
-      let progress = 0;
-      for (const issue of assignedIssues) {
-        store.updateIssue(issue.id, { status: 'in_progress' });
-
-        let cards;
-
-        if (this.isLLMMode()) {
-          const client = this.getClientForAgent(analyst.id);
-          if (client) {
-            const llmAgent = new LLMAgent(analyst, client);
-            const queryResults = await executeAnalysisQueries(analyst.role);
-            cards = await llmAgent.analyzeIssue(issue, queryResults);
-          } else {
-            const demoAgent = new DemoAgent(analyst);
-            cards = await demoAgent.analyzeIssue(issue);
-          }
-        } else {
-          const demoAgent = new DemoAgent(analyst);
-          cards = await demoAgent.analyzeIssue(issue);
+        // Skip if no issues assigned
+        if (assignedIssues.length === 0) {
+          console.warn(`[Workflow] No issues assigned to ${analyst.name}, skipping`);
+          store.setAgentProgress(analyst.id, 100);
+          store.setAgentStatus(analyst.id, 'done');
+          continue;
         }
 
-        progress += Math.floor(100 / Math.max(assignedIssues.length, 1));
-        store.setAgentProgress(analyst.id, Math.min(progress, 95));
+        let progress = 0;
+        for (const issue of assignedIssues) {
+          try {
+            store.updateIssue(issue.id, { status: 'in_progress' });
 
-        for (const card of cards) {
-          store.addCard(card);
+            let cards;
 
-          // Generate message about findings
-          let findingsMessage: string;
-          if (this.isLLMMode()) {
-            const client = this.getClientForAgent(analyst.id);
-            if (client) {
-              const llmAgent = new LLMAgent(analyst, client);
-              findingsMessage = await llmAgent.generateFindingsMessage(card);
+            if (this.isLLMMode()) {
+              const client = this.getClientForAgent(analyst.id);
+              if (client) {
+                try {
+                  const llmAgent = new LLMAgent(analyst, client);
+                  const queryResults = await executeAnalysisQueries(analyst.role);
+                  cards = await llmAgent.analyzeIssue(issue, queryResults);
+                } catch (llmError) {
+                  console.error(`[Workflow] LLM analysis failed for ${analyst.name}, falling back to demo:`, llmError);
+                  const demoAgent = new DemoAgent(analyst);
+                  cards = await demoAgent.analyzeIssue(issue);
+                }
+              } else {
+                const demoAgent = new DemoAgent(analyst);
+                cards = await demoAgent.analyzeIssue(issue);
+              }
             } else {
-              findingsMessage = `【分析結果報告】${card.claim}`;
+              const demoAgent = new DemoAgent(analyst);
+              cards = await demoAgent.analyzeIssue(issue);
             }
-          } else {
-            findingsMessage = `【分析結果報告】${card.claim}\n\n信頼度: ${card.confidence}\n手法: ${card.method}`;
-          }
 
-          store.addMessage({
-            speaker: analyst.id,
-            type: 'proposal',
-            content: findingsMessage,
-            ref_cards: [card.id],
-            ref_issues: [issue.id],
-          });
-          await delay(animationSpeed);
+            progress += Math.floor(100 / Math.max(assignedIssues.length, 1));
+            store.setAgentProgress(analyst.id, Math.min(progress, 95));
+
+            // Handle case where no cards were generated
+            if (!cards || cards.length === 0) {
+              console.warn(`[Workflow] No cards generated for issue ${issue.title}`);
+              store.updateIssue(issue.id, { status: 'resolved' });
+              continue;
+            }
+
+            for (const card of cards) {
+              store.addCard(card);
+
+              // Generate message about findings with error handling
+              let findingsMessage: string;
+              try {
+                if (this.isLLMMode()) {
+                  const client = this.getClientForAgent(analyst.id);
+                  if (client) {
+                    const llmAgent = new LLMAgent(analyst, client);
+                    findingsMessage = await llmAgent.generateFindingsMessage(card);
+                  } else {
+                    findingsMessage = `【分析結果報告】${card.claim}`;
+                  }
+                } else {
+                  findingsMessage = `【分析結果報告】${card.claim}\n\n信頼度: ${card.confidence}\n手法: ${card.method}`;
+                }
+              } catch (msgError) {
+                console.warn(`[Workflow] Failed to generate findings message:`, msgError);
+                findingsMessage = `【分析結果報告】${card.claim}`;
+              }
+
+              store.addMessage({
+                speaker: analyst.id,
+                type: 'proposal',
+                content: findingsMessage,
+                ref_cards: [card.id],
+                ref_issues: [issue.id],
+              });
+              await delay(animationSpeed);
+            }
+
+            store.updateIssue(issue.id, { status: 'resolved' });
+          } catch (issueError) {
+            console.error(`[Workflow] Error processing issue ${issue.title}:`, issueError);
+            store.updateIssue(issue.id, { status: 'resolved' });
+          }
         }
 
-        store.updateIssue(issue.id, { status: 'resolved' });
+        store.setAgentProgress(analyst.id, 100);
+        store.setAgentStatus(analyst.id, 'done');
+      } catch (analystError) {
+        console.error(`[Workflow] Error processing analyst ${analyst.name}:`, analystError);
+        store.setAgentProgress(analyst.id, 100);
+        store.setAgentStatus(analyst.id, 'done');
       }
-
-      store.setAgentProgress(analyst.id, 100);
-      store.setAgentStatus(analyst.id, 'done');
     }
 
     // Chair announces transition to council
@@ -390,86 +427,126 @@ export class WorkflowOrchestrator {
 
     // Phase 1: Each analyst critiques others' work
     for (const analyst of analysts) {
-      store.setAgentStatus(analyst.id, 'discussing');
+      try {
+        store.setAgentStatus(analyst.id, 'discussing');
 
-      const otherCards = session.cards.filter((c) => c.author_agent !== analyst.id);
+        const otherCards = session.cards.filter((c) => c.author_agent !== analyst.id);
 
-      // Critique multiple other cards
-      const cardsToReview = otherCards.slice(0, 3); // Review up to 3 other cards
-
-      for (const targetCard of cardsToReview) {
-        const targetAgent = session.agents.find((a) => a.id === targetCard.author_agent);
-        if (!targetAgent) continue;
-
-        let critique: { type: 'question' | 'critique' | 'support'; content: string };
-
-        if (this.isLLMMode()) {
-          const client = this.getClientForAgent(analyst.id);
-          if (client) {
-            const llmAgent = new LLMAgent(analyst, client);
-            critique = await llmAgent.generateCritique(targetCard, targetAgent.name);
-          } else {
-            critique = this.generateDemoCritique(targetCard, targetAgent.name);
-          }
-        } else {
-          critique = this.generateDemoCritique(targetCard, targetAgent.name);
+        // Skip if no other cards to critique
+        if (otherCards.length === 0) {
+          store.setAgentStatus(analyst.id, 'waiting');
+          continue;
         }
 
-        store.addMessage({
-          speaker: analyst.id,
-          type: critique.type,
-          content: critique.content,
-          ref_cards: [targetCard.id],
-        });
-        await delay(animationSpeed);
-      }
+        // Critique multiple other cards
+        const cardsToReview = otherCards.slice(0, 3); // Review up to 3 other cards
 
-      store.setAgentStatus(analyst.id, 'waiting');
+        for (const targetCard of cardsToReview) {
+          try {
+            const targetAgent = session.agents.find((a) => a.id === targetCard.author_agent);
+            if (!targetAgent) continue;
+
+            let critique: { type: 'question' | 'critique' | 'support'; content: string };
+
+            if (this.isLLMMode()) {
+              const client = this.getClientForAgent(analyst.id);
+              if (client) {
+                try {
+                  const llmAgent = new LLMAgent(analyst, client);
+                  critique = await llmAgent.generateCritique(targetCard, targetAgent.name);
+                } catch (llmError) {
+                  console.warn(`[Workflow] LLM critique failed, using demo:`, llmError);
+                  critique = this.generateDemoCritique(targetCard, targetAgent.name);
+                }
+              } else {
+                critique = this.generateDemoCritique(targetCard, targetAgent.name);
+              }
+            } else {
+              critique = this.generateDemoCritique(targetCard, targetAgent.name);
+            }
+
+            store.addMessage({
+              speaker: analyst.id,
+              type: critique.type,
+              content: critique.content,
+              ref_cards: [targetCard.id],
+            });
+            await delay(animationSpeed);
+          } catch (critiqueError) {
+            console.warn(`[Workflow] Error generating critique:`, critiqueError);
+          }
+        }
+
+        store.setAgentStatus(analyst.id, 'waiting');
+      } catch (analystError) {
+        console.error(`[Workflow] Error in council phase for ${analyst.name}:`, analystError);
+        store.setAgentStatus(analyst.id, 'waiting');
+      }
     }
 
     // Phase 2: Analysts respond to critiques about their work
     await delay(animationSpeed);
 
-    const critiques = useCouncilStore.getState().session!.messages.filter(
-      (m) => m.type === 'critique' || m.type === 'question'
-    );
-
-    for (const critique of critiques) {
-      const refCardId = critique.ref_cards?.[0];
-      if (!refCardId) continue;
-
-      const card = session.cards.find((c) => c.id === refCardId);
-      if (!card) continue;
-
-      const cardAuthor = session.agents.find((a) => a.id === card.author_agent);
-      const critiquer = session.agents.find((a) => a.id === critique.speaker);
-      if (!cardAuthor || !critiquer || cardAuthor.id === critique.speaker) continue;
-
-      store.setAgentStatus(cardAuthor.id, 'discussing');
-
-      let response: string;
-
-      if (this.isLLMMode()) {
-        const client = this.getClientForAgent(cardAuthor.id);
-        if (client) {
-          const llmAgent = new LLMAgent(cardAuthor, client);
-          response = await llmAgent.generateResponse(critique, card, critiquer.name);
-        } else {
-          response = this.generateDemoResponse(critique, card, critiquer.name);
-        }
-      } else {
-        response = this.generateDemoResponse(critique, card, critiquer.name);
+    try {
+      const currentSession = useCouncilStore.getState().session;
+      if (!currentSession) {
+        console.warn('[Workflow] Session not found during council phase 2');
+        store.incrementRound();
+        return 'ITERATE';
       }
 
-      store.addMessage({
-        speaker: cardAuthor.id,
-        type: 'support',
-        content: response,
-        ref_cards: [card.id],
-      });
-      await delay(animationSpeed);
+      const critiques = currentSession.messages.filter(
+        (m) => m.type === 'critique' || m.type === 'question'
+      );
 
-      store.setAgentStatus(cardAuthor.id, 'done');
+      for (const critique of critiques) {
+        try {
+          const refCardId = critique.ref_cards?.[0];
+          if (!refCardId) continue;
+
+          const card = currentSession.cards.find((c) => c.id === refCardId);
+          if (!card) continue;
+
+          const cardAuthor = currentSession.agents.find((a) => a.id === card.author_agent);
+          const critiquer = currentSession.agents.find((a) => a.id === critique.speaker);
+          if (!cardAuthor || !critiquer || cardAuthor.id === critique.speaker) continue;
+
+          store.setAgentStatus(cardAuthor.id, 'discussing');
+
+          let response: string;
+
+          if (this.isLLMMode()) {
+            const client = this.getClientForAgent(cardAuthor.id);
+            if (client) {
+              try {
+                const llmAgent = new LLMAgent(cardAuthor, client);
+                response = await llmAgent.generateResponse(critique, card, critiquer.name);
+              } catch (llmError) {
+                console.warn(`[Workflow] LLM response failed, using demo:`, llmError);
+                response = this.generateDemoResponse(critique, card, critiquer.name);
+              }
+            } else {
+              response = this.generateDemoResponse(critique, card, critiquer.name);
+            }
+          } else {
+            response = this.generateDemoResponse(critique, card, critiquer.name);
+          }
+
+          store.addMessage({
+            speaker: cardAuthor.id,
+            type: 'support',
+            content: response,
+            ref_cards: [card.id],
+          });
+          await delay(animationSpeed);
+
+          store.setAgentStatus(cardAuthor.id, 'done');
+        } catch (responseError) {
+          console.warn(`[Workflow] Error generating response:`, responseError);
+        }
+      }
+    } catch (phase2Error) {
+      console.error(`[Workflow] Error in council phase 2:`, phase2Error);
     }
 
     // Mark all analysts as done
