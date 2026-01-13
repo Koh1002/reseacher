@@ -547,10 +547,10 @@ analysis_storyには:
 
 export async function executeAnalysisQueries(role: string): Promise<Record<string, any[]>> {
   const roleQueryMap: Record<string, AnalysisQueryKey[]> = {
-    growth_analyst: ['monthlyTrend', 'storePerformance', 'totalSales'],
-    segment_analyst: ['customerSegments', 'priceRangeAnalysis'],
-    basket_analyst: ['basketSize', 'categoryCoPurchase'],
-    seasonality_analyst: ['dayOfWeekPattern', 'monthlyTrend'],
+    growth_analyst: ['monthlyTrend', 'storePerformance', 'totalSales', 'salesByCategory'],
+    segment_analyst: ['customerSegments', 'customerLTV', 'priceRangeAnalysis'],
+    basket_analyst: ['basketSize', 'categoryCoPurchase', 'topProducts'],
+    seasonality_analyst: ['dayOfWeekPattern', 'monthlyTrend', 'salesByCategory'],
   };
 
   const queries = roleQueryMap[role] || ['totalSales'];
