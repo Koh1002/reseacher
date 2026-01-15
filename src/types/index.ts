@@ -148,10 +148,12 @@ export interface Agent {
  */
 export type WorkflowState =
   | 'IDLE'
+  | 'DATA_SCAN'       // BYD mode: scanning uploaded data
   | 'PLANNING'
   | 'ISSUE_DECOMPOSE'
   | 'ANALYZING'
   | 'COUNCIL'
+  | 'QUALITY_CHECK'   // Chair evaluates analysis quality
   | 'ITERATE'
   | 'FINALIZE'
   | 'DONE'
@@ -186,10 +188,16 @@ export interface AnalysisReport {
  */
 export interface CouncilSession {
   id: string;
-  topic: string;          // User's analysis request
+  topic: string;          // User's analysis request (can change per iteration)
+  originalTopic: string;  // Original user request
   state: WorkflowState;
   round: number;
   max_rounds: number;
+  iteration: number;      // Current iteration (1-5)
+  maxIterations: number;  // Always 5
+  minIterations: number;  // Always 3
+  iterationHistory: IterationRound[];
+  currentEvaluation?: QualityEvaluation;
   agents: Agent[];
   issues: Issue[];
   cards: EvidenceCard[];
@@ -212,4 +220,79 @@ export interface AppConfig {
   max_rounds: number;
   animation_enabled: boolean;
   animation_speed: number; // ms between messages
+}
+
+// ============ BYD Mode Types ============
+
+/**
+ * Data mode selection
+ */
+export type DataMode = 'DEMO' | 'BYD';
+
+/**
+ * Detected column information
+ */
+export interface ColumnInfo {
+  name: string;
+  type: 'string' | 'number' | 'date' | 'unknown';
+  sampleValues: string[];
+  nullCount: number;
+  uniqueCount: number;
+  // Inferred purpose
+  inferredRole?: 'date' | 'member_id' | 'store' | 'category' | 'product' | 'quantity' | 'amount' | 'transaction_id' | 'other';
+}
+
+/**
+ * Detected data schema from uploaded CSV
+ */
+export interface DataSchema {
+  tableName: string;
+  rowCount: number;
+  columns: ColumnInfo[];
+  summary: string; // Natural language summary of the data
+  dataType: 'supermarket' | 'drugstore' | 'retail' | 'unknown';
+  // Column mappings for analysis queries
+  columnMappings: {
+    dateColumn?: string;
+    memberIdColumn?: string;
+    storeColumn?: string;
+    categoryColumn?: string;
+    productColumn?: string;
+    quantityColumn?: string;
+    amountColumn?: string;
+    transactionIdColumn?: string;
+  };
+}
+
+// ============ Iteration & Quality Evaluation Types ============
+
+/**
+ * Quality scores for analysis evaluation
+ */
+export interface QualityScores {
+  specificity: number;     // 1-5: How specific and actionable are the findings
+  novelty: number;         // 1-5: How new/non-obvious are the insights
+  actionClarity: number;   // 1-5: How clear are the next action recommendations
+}
+
+/**
+ * Quality evaluation result from Chair
+ */
+export interface QualityEvaluation {
+  scores: QualityScores;
+  passed: boolean;          // All scores >= 3
+  feedback: string;         // Explanation of evaluation
+  suggestedTheme?: string;  // New theme if not passed
+}
+
+/**
+ * Record of one iteration round
+ */
+export interface IterationRound {
+  roundNumber: number;
+  theme: string;
+  evaluation?: QualityEvaluation;
+  cardIds: string[];
+  startedAt: string;
+  endedAt?: string;
 }

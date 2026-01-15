@@ -11,10 +11,14 @@ import type {
   AnalysisReport,
   AppConfig,
   CouncilSession,
+  DataMode,
+  DataSchema,
   EvidenceCard,
   Issue,
+  IterationRound,
   LLMMode,
   Message,
+  QualityEvaluation,
   WorkflowState,
 } from '../types';
 import type { LLMProvider } from '../utils/llmClient';
@@ -79,6 +83,12 @@ interface CouncilState {
   setAgentLLMAssignments: (assignments: Map<string, LLMProvider>) => void;
   getAgentProvider: (agentId: string) => LLMProvider | undefined;
 
+  // BYD Mode
+  dataMode: DataMode;
+  setDataMode: (mode: DataMode) => void;
+  dataSchema: DataSchema | null;
+  setDataSchema: (schema: DataSchema | null) => void;
+
   // Session
   session: CouncilSession | null;
   isDataLoaded: boolean;
@@ -89,6 +99,13 @@ interface CouncilState {
   endSession: () => void;
   setWorkflowState: (state: WorkflowState) => void;
   incrementRound: () => void;
+
+  // Iteration actions
+  incrementIteration: () => void;
+  setCurrentTopic: (topic: string) => void;
+  addIterationRound: (round: IterationRound) => void;
+  updateIterationRound: (roundNumber: number, updates: Partial<IterationRound>) => void;
+  setQualityEvaluation: (evaluation: QualityEvaluation) => void;
 
   // Agent actions
   updateAgent: (agentId: string, updates: Partial<Agent>) => void;
@@ -167,6 +184,12 @@ export const useCouncilStore = create<CouncilState>()(
 
       getAgentProvider: (agentId) => get().agentLLMAssignments.get(agentId),
 
+      // BYD Mode
+      dataMode: 'DEMO' as DataMode,
+      setDataMode: (mode) => set({ dataMode: mode }),
+      dataSchema: null,
+      setDataSchema: (schema) => set({ dataSchema: schema }),
+
       // Session state
       session: null,
       isDataLoaded: false,
@@ -186,9 +209,14 @@ export const useCouncilStore = create<CouncilState>()(
     const session: CouncilSession = {
       id: generateId(),
       topic,
+      originalTopic: topic,
       state: 'IDLE',
       round: 0,
       max_rounds: get().config.max_rounds,
+      iteration: 1,
+      maxIterations: 5,
+      minIterations: 3,
+      iterationHistory: [],
       agents,
       issues: [],
       cards: [],
@@ -215,6 +243,45 @@ export const useCouncilStore = create<CouncilState>()(
     set((state) => ({
       session: state.session
         ? { ...state.session, round: state.session.round + 1 }
+        : null,
+    })),
+
+  // Iteration actions
+  incrementIteration: () =>
+    set((state) => ({
+      session: state.session
+        ? { ...state.session, iteration: state.session.iteration + 1 }
+        : null,
+    })),
+
+  setCurrentTopic: (topic) =>
+    set((state) => ({
+      session: state.session ? { ...state.session, topic } : null,
+    })),
+
+  addIterationRound: (round) =>
+    set((state) => ({
+      session: state.session
+        ? { ...state.session, iterationHistory: [...state.session.iterationHistory, round] }
+        : null,
+    })),
+
+  updateIterationRound: (roundNumber, updates) =>
+    set((state) => ({
+      session: state.session
+        ? {
+            ...state.session,
+            iterationHistory: state.session.iterationHistory.map((r) =>
+              r.roundNumber === roundNumber ? { ...r, ...updates } : r
+            ),
+          }
+        : null,
+    })),
+
+  setQualityEvaluation: (evaluation) =>
+    set((state) => ({
+      session: state.session
+        ? { ...state.session, currentEvaluation: evaluation }
         : null,
     })),
 

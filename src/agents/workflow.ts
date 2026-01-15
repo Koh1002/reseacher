@@ -2,12 +2,12 @@
 // Workflow State Machine & Orchestration
 // =============================================
 
-import type { WorkflowState, AnalysisReport, Message } from '../types';
+import type { WorkflowState, AnalysisReport, Message, DataSchema, QualityEvaluation, IterationRound } from '../types';
 import { useCouncilStore } from '../store/councilStore';
 import { DemoAgent, DemoChairAgent } from './demoAgents';
 import { LLMAgent, LLMChairAgent, executeAnalysisQueries } from './llmAgents';
 import { LLMClient, getAvailableProviders, type LLMProvider } from '../utils/llmClient';
-import { loadCSV, initDuckDB, tableExists } from '../utils/duckdb';
+import { loadCSV, initDuckDB, tableExists, generateDynamicQueries, ANALYSIS_QUERIES } from '../utils/duckdb';
 
 // Get base path for assets
 const BASE_PATH = import.meta.env.BASE_URL || '/';
@@ -24,12 +24,35 @@ export class WorkflowOrchestrator {
   private isRunning = false;
   private abortController: AbortController | null = null;
   private llmClients: Map<string, LLMClient> = new Map();
+  private dataSchema: DataSchema | null = null;
+  private dynamicQueries: Record<string, string> | null = null;
 
   /**
-   * Initialize database with sample data
+   * Initialize database with sample data or use BYD data
    */
-  async initializeData(): Promise<void> {
+  async initializeData(providedSchema?: DataSchema): Promise<void> {
     const store = useCouncilStore.getState();
+
+    // If BYD mode with provided schema, use that
+    if (providedSchema) {
+      this.dataSchema = providedSchema;
+      this.dynamicQueries = generateDynamicQueries(providedSchema);
+      store.setDataLoaded(true);
+      console.log('[Workflow] BYD Data initialized with schema:', providedSchema.tableName);
+      return;
+    }
+
+    // Check if we have a schema from store (BYD mode)
+    const storeSchema = store.dataSchema;
+    if (storeSchema) {
+      this.dataSchema = storeSchema;
+      this.dynamicQueries = generateDynamicQueries(storeSchema);
+      store.setDataLoaded(true);
+      console.log('[Workflow] Using existing BYD schema:', storeSchema.tableName);
+      return;
+    }
+
+    // Standard DEMO mode - load sample data
     if (store.isDataLoaded) return;
 
     await initDuckDB();
@@ -41,8 +64,27 @@ export class WorkflowOrchestrator {
       await loadCSV('purchase_history', csvUrl);
     }
 
+    this.dataSchema = null;
+    this.dynamicQueries = null;
     store.setDataLoaded(true);
-    console.log('[Workflow] Data initialized');
+    console.log('[Workflow] DEMO Data initialized');
+  }
+
+  /**
+   * Get the appropriate queries (dynamic for BYD, static for DEMO)
+   */
+  getQueries(): Record<string, string> {
+    if (this.dynamicQueries) {
+      return this.dynamicQueries;
+    }
+    return ANALYSIS_QUERIES as Record<string, string>;
+  }
+
+  /**
+   * Check if using BYD mode
+   */
+  isBYDMode(): boolean {
+    return this.dataSchema !== null;
   }
 
   /**
@@ -119,7 +161,7 @@ export class WorkflowOrchestrator {
   /**
    * Start the analysis workflow
    */
-  async start(topic: string): Promise<void> {
+  async start(topic: string, dataSchema?: DataSchema): Promise<void> {
     if (this.isRunning) {
       console.warn('[Workflow] Already running');
       return;
@@ -132,11 +174,20 @@ export class WorkflowOrchestrator {
 
     try {
       // Initialize data if needed
-      await this.initializeData();
+      await this.initializeData(dataSchema);
 
       // Create session
       store.startSession(topic);
       await delay(animationSpeed);
+
+      // Add initial iteration round
+      const initialRound: IterationRound = {
+        roundNumber: 1,
+        theme: topic,
+        cardIds: [],
+        startedAt: new Date().toISOString(),
+      };
+      store.addIterationRound(initialRound);
 
       // Initialize LLM clients
       this.initializeLLMClients();
@@ -168,10 +219,12 @@ export class WorkflowOrchestrator {
   private async runStateMachine(animationSpeed: number): Promise<void> {
     const transitions: Record<WorkflowState, () => Promise<WorkflowState>> = {
       IDLE: async () => 'PLANNING',
+      DATA_SCAN: async () => this.runDataScan(animationSpeed),
       PLANNING: async () => this.runPlanning(animationSpeed),
       ISSUE_DECOMPOSE: async () => this.runIssueDecompose(animationSpeed),
       ANALYZING: async () => this.runAnalyzing(animationSpeed),
       COUNCIL: async () => this.runCouncil(animationSpeed),
+      QUALITY_CHECK: async () => this.runQualityCheck(animationSpeed),
       ITERATE: async () => this.checkIteration(),
       FINALIZE: async () => this.runFinalize(animationSpeed),
       DONE: async () => 'DONE',
@@ -198,6 +251,32 @@ export class WorkflowOrchestrator {
     }
 
     useCouncilStore.getState().setWorkflowState(currentState);
+  }
+
+  /**
+   * DATA_SCAN phase: Analyze BYD data structure (only for BYD mode)
+   */
+  private async runDataScan(animationSpeed: number): Promise<WorkflowState> {
+    const store = useCouncilStore.getState();
+    const session = store.session!;
+    const chair = session.agents.find((a) => a.role === 'chair')!;
+
+    if (!this.dataSchema) {
+      return 'PLANNING';
+    }
+
+    store.setAgentStatus(chair.id, 'analyzing');
+
+    store.addMessage({
+      speaker: chair.id,
+      type: 'system',
+      content: `【データスキャン完了】\n${this.dataSchema.summary}`,
+    });
+
+    await delay(animationSpeed);
+    store.setAgentStatus(chair.id, 'waiting');
+
+    return 'PLANNING';
   }
 
   /**
@@ -523,7 +602,7 @@ export class WorkflowOrchestrator {
       if (!currentSession) {
         console.warn('[Workflow] Session not found during council phase 2');
         store.incrementRound();
-        return 'ITERATE';
+        return 'QUALITY_CHECK';
       }
 
       const critiques = currentSession.messages.filter(
@@ -586,7 +665,7 @@ export class WorkflowOrchestrator {
     }
 
     store.incrementRound();
-    return 'ITERATE';
+    return 'QUALITY_CHECK';
   }
 
   /**
@@ -647,24 +726,265 @@ export class WorkflowOrchestrator {
   }
 
   /**
+   * QUALITY_CHECK phase: Chair evaluates the analysis quality
+   */
+  private async runQualityCheck(animationSpeed: number): Promise<WorkflowState> {
+    const store = useCouncilStore.getState();
+    const session = store.session!;
+    const chair = session.agents.find((a) => a.role === 'chair')!;
+    const currentIteration = session.iteration;
+
+    store.setAgentStatus(chair.id, 'analyzing');
+
+    // Get cards from current iteration
+    const currentRound = session.iterationHistory.find((r) => r.roundNumber === currentIteration);
+    const iterationCards = session.cards.filter((c) =>
+      currentRound?.cardIds.includes(c.id) || !currentRound
+    );
+
+    let evaluation: QualityEvaluation;
+
+    if (this.isLLMMode()) {
+      const client = this.getClientForAgent(chair.id);
+      if (client) {
+        evaluation = await this.generateLLMQualityEvaluation(client, session.topic, iterationCards, session.messages);
+      } else {
+        evaluation = this.generateDemoQualityEvaluation(iterationCards, currentIteration);
+      }
+    } else {
+      evaluation = this.generateDemoQualityEvaluation(iterationCards, currentIteration);
+    }
+
+    store.setQualityEvaluation(evaluation);
+
+    // Update current iteration round with evaluation
+    store.updateIterationRound(currentIteration, {
+      evaluation,
+      endedAt: new Date().toISOString(),
+    });
+
+    // Announce evaluation results
+    const scoreText = `具体性: ${evaluation.scores.specificity}/5, 新規性: ${evaluation.scores.novelty}/5, アクション明瞭さ: ${evaluation.scores.actionClarity}/5`;
+
+    if (evaluation.passed) {
+      store.addMessage({
+        speaker: chair.id,
+        type: 'decision',
+        content: `【品質評価: 合格】\n${scoreText}\n\n${evaluation.feedback}`,
+      });
+    } else {
+      store.addMessage({
+        speaker: chair.id,
+        type: 'critique',
+        content: `【品質評価: 再分析が必要】\n${scoreText}\n\n${evaluation.feedback}\n\n次のイテレーションでは「${evaluation.suggestedTheme}」に焦点を当てて分析を深めます。`,
+      });
+    }
+
+    await delay(animationSpeed);
+    store.setAgentStatus(chair.id, 'waiting');
+
+    return 'ITERATE';
+  }
+
+  /**
+   * Generate quality evaluation using LLM
+   */
+  private async generateLLMQualityEvaluation(
+    client: LLMClient,
+    topic: string,
+    cards: { claim: string; metrics: { name: string; value: number | string; unit?: string }[]; confidence: string }[],
+    messages: Message[]
+  ): Promise<QualityEvaluation> {
+    const cardSummary = cards.map((c) => `- ${c.claim} (信頼度: ${c.confidence})`).join('\n');
+    const discussionHighlights = messages
+      .filter((m) => m.type === 'critique' || m.type === 'question' || m.type === 'support')
+      .slice(-5)
+      .map((m) => `- ${m.content.substring(0, 80)}...`)
+      .join('\n');
+
+    const prompt = `あなたは分析議会の議長です。以下の分析結果を評価してください。
+
+【分析テーマ】
+${topic}
+
+【エビデンスカード】
+${cardSummary}
+
+【議論のハイライト】
+${discussionHighlights || 'なし'}
+
+以下の3つの観点で1-5の点数をつけ、JSON形式で回答してください：
+
+1. 具体性 (specificity): 分析結果が具体的で実行可能か
+2. 新規性 (novelty): 当たり前でない新しい発見があるか
+3. アクション明瞭さ (actionClarity): 次のアクションが明確に示されているか
+
+評価基準：
+- 1-2点: 不十分、再分析が必要
+- 3点: 最低限の基準を満たす
+- 4-5点: 優れている
+
+JSON形式:
+{
+  "specificity": 数値(1-5),
+  "novelty": 数値(1-5),
+  "actionClarity": 数値(1-5),
+  "feedback": "評価の説明（2-3文）",
+  "suggestedTheme": "再分析が必要な場合の新テーマ（任意）"
+}`;
+
+    try {
+      const response = await client.chat([
+        { role: 'system', content: 'あなたはデータ分析の品質を評価する専門家です。' },
+        { role: 'user', content: prompt },
+      ], { temperature: 0.5 });
+
+      const jsonMatch = response.content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const scores = {
+          specificity: Math.min(5, Math.max(1, Number(parsed.specificity) || 3)),
+          novelty: Math.min(5, Math.max(1, Number(parsed.novelty) || 3)),
+          actionClarity: Math.min(5, Math.max(1, Number(parsed.actionClarity) || 3)),
+        };
+        const passed = scores.specificity >= 3 && scores.novelty >= 3 && scores.actionClarity >= 3;
+
+        return {
+          scores,
+          passed,
+          feedback: parsed.feedback || '評価を完了しました。',
+          suggestedTheme: passed ? undefined : (parsed.suggestedTheme || `${topic}の詳細分析`),
+        };
+      }
+    } catch (error) {
+      console.warn('[Workflow] LLM quality evaluation failed:', error);
+    }
+
+    // Fallback to demo evaluation
+    return this.generateDemoQualityEvaluation(cards, 1);
+  }
+
+  /**
+   * Generate demo quality evaluation
+   */
+  private generateDemoQualityEvaluation(
+    _cards: { claim: string; confidence: string }[],
+    currentIteration: number
+  ): QualityEvaluation {
+    // Progressively improve scores in later iterations
+    const baseScore = Math.min(2 + currentIteration, 4);
+    const variance = () => Math.floor(Math.random() * 2) - 1;
+
+    const scores = {
+      specificity: Math.min(5, Math.max(1, baseScore + variance())),
+      novelty: Math.min(5, Math.max(1, baseScore + variance() - 1)),
+      actionClarity: Math.min(5, Math.max(1, baseScore + variance())),
+    };
+
+    const passed = scores.specificity >= 3 && scores.novelty >= 3 && scores.actionClarity >= 3;
+
+    const feedbackTemplates = {
+      low: [
+        '分析結果がまだ表面的です。より具体的なデータポイントと実行可能なアクションが必要です。',
+        '新規性のある発見が不足しています。一般的な傾向以上の深い洞察を求めます。',
+        '次のアクションが不明確です。具体的な施策提案が必要です。',
+      ],
+      pass: [
+        '分析結果は十分な具体性と実行可能性を持っています。',
+        '有意義な発見があり、ビジネス価値のある洞察が得られました。',
+        '次のステップが明確に示されており、実行に移せる状態です。',
+      ],
+    };
+
+    const suggestedThemes = [
+      '顧客セグメント別の購買パターン深掘り',
+      '店舗間のベストプラクティス特定',
+      '季節性を考慮した需要予測',
+      '高LTV顧客の行動特性分析',
+      '併買パターンからのクロスセル機会発見',
+    ];
+
+    return {
+      scores,
+      passed,
+      feedback: passed
+        ? feedbackTemplates.pass[Math.floor(Math.random() * feedbackTemplates.pass.length)]
+        : feedbackTemplates.low[Math.floor(Math.random() * feedbackTemplates.low.length)],
+      suggestedTheme: passed ? undefined : suggestedThemes[Math.floor(Math.random() * suggestedThemes.length)],
+    };
+  }
+
+  /**
    * Check if we should iterate or finalize
    */
   private async checkIteration(): Promise<WorkflowState> {
     const store = useCouncilStore.getState();
     const session = store.session!;
 
-    // Check stopping conditions
-    const allAnalystsSubmitted = session.agents
-      .filter((a) => a.role !== 'chair')
-      .every((a) => a.cards_submitted >= 1 && a.messages_sent >= 1);
+    const currentIteration = session.iteration;
+    const minIterations = session.minIterations; // 3
+    const maxIterations = session.maxIterations; // 5
+    const evaluation = session.currentEvaluation;
 
-    const maxRoundsReached = session.round >= session.max_rounds;
+    // Always run at least minIterations (3)
+    if (currentIteration < minIterations) {
+      console.log(`[Workflow] Iteration ${currentIteration}/${minIterations} (minimum not reached)`);
+      return this.startNextIteration(store);
+    }
 
-    if (allAnalystsSubmitted || maxRoundsReached) {
+    // If quality passed after minimum iterations, finalize
+    if (evaluation?.passed) {
+      console.log(`[Workflow] Quality check passed at iteration ${currentIteration}`);
       return 'FINALIZE';
     }
 
-    return 'ANALYZING';
+    // If max iterations reached, finalize anyway
+    if (currentIteration >= maxIterations) {
+      console.log(`[Workflow] Max iterations (${maxIterations}) reached, finalizing`);
+      return 'FINALIZE';
+    }
+
+    // Otherwise, continue to next iteration with new theme
+    console.log(`[Workflow] Quality not passed, continuing to iteration ${currentIteration + 1}`);
+    return this.startNextIteration(store);
+  }
+
+  /**
+   * Start the next iteration
+   */
+  private startNextIteration(store: ReturnType<typeof useCouncilStore.getState>): WorkflowState {
+    const session = store.session!;
+    const evaluation = session.currentEvaluation;
+
+    // Increment iteration
+    store.incrementIteration();
+
+    // Update topic if suggested
+    if (evaluation?.suggestedTheme) {
+      store.setCurrentTopic(evaluation.suggestedTheme);
+    }
+
+    // Create new iteration round
+    const newRound: IterationRound = {
+      roundNumber: session.iteration + 1,
+      theme: evaluation?.suggestedTheme || session.topic,
+      cardIds: [],
+      startedAt: new Date().toISOString(),
+    };
+    store.addIterationRound(newRound);
+
+    // Reset agent states for new iteration
+    session.agents.forEach((agent) => {
+      if (agent.role !== 'chair') {
+        store.setAgentStatus(agent.id, 'idle');
+        store.setAgentProgress(agent.id, 0);
+      }
+    });
+
+    // Clear issues for fresh analysis
+    // Note: We keep cards and messages for historical context
+
+    return 'ISSUE_DECOMPOSE';
   }
 
   /**
