@@ -226,16 +226,32 @@ export class DemoAgent {
   /**
    * Generate issues based on the analysis topic
    */
-  async generateIssues(topic: string): Promise<Issue[]> {
+  async generateIssues(topic: string, iteration: number = 1): Promise<Issue[]> {
     const template = getTemplateForRole(this.agent.role);
     if (!template) return [];
 
+    // For iterations > 1, modify the issue approach to go deeper
+    const deepeningPrefix = iteration > 1
+      ? `【深堀り分析 (イテレーション${iteration})】`
+      : '';
+
+    const deepeningAngles = [
+      '要因分析',
+      '具体的施策検討',
+      'セグメント別詳細',
+      '優先順位付け',
+    ];
+    const angleIndex = Math.min(iteration - 1, deepeningAngles.length - 1);
+    const currentAngle = iteration > 1 ? deepeningAngles[angleIndex] : '';
+
     return template.issueTemplates.map((t) => ({
       id: generateId(),
-      title: t.title,
-      description: `${t.description}\n\n【お題との関連】${topic}`,
+      title: iteration > 1 ? `${t.title}の${currentAngle}` : t.title,
+      description: `${deepeningPrefix}${t.description}\n\n【お題との関連】${topic}${iteration > 1 ? `\n\n【イテレーション${iteration}の焦点】前回までの分析を踏まえ、より具体的なアクションにつながる深堀り分析を行う。` : ''}`,
       why_it_matters: t.why_it_matters,
-      hypotheses: t.hypotheses,
+      hypotheses: iteration > 1
+        ? t.hypotheses.map(h => `${h}（詳細検証）`)
+        : t.hypotheses,
       required_cards: ['evidence'],
       status: 'open' as const,
       assigned_to: this.agent.id,
@@ -708,12 +724,18 @@ export class DemoChairAgent {
   /**
    * Generate the planning message
    */
-  generatePlanningMessage(topic: string, analysts: Agent[]): Omit<Message, 'id' | 'ts'> {
+  generatePlanningMessage(topic: string, analysts: Agent[], iteration: number = 1): Omit<Message, 'id' | 'ts'> {
     const analystNames = analysts.map((a) => a.name).join('、');
+    const isRestart = iteration > 1;
+
+    const iterationFocus = isRestart
+      ? `\n\n【イテレーション${iteration}の焦点】\n前回までの分析結果を踏まえ、より具体的で実行可能なアクションにつながる深堀り分析を行います。同じ内容の繰り返しではなく、新しい視点からの洞察を期待します。`
+      : '';
+
     return {
       speaker: this.agent.id,
       type: 'proposal' as MessageType,
-      content: `【議会開始】\n分析テーマ: 「${topic}」\n\n本議会では以下のアナリストが分析を担当します:\n${analystNames}\n\n各アナリストは専門の視点から論点を設定し、データ分析を実施します。結果が出揃い次第、議論フェーズに移行します。`,
+      content: `【議会${isRestart ? '再開' : '開始'}】\n分析テーマ: 「${topic}」${iterationFocus}\n\n本議会では以下のアナリストが分析を担当します:\n${analystNames}\n\n各アナリストは専門の視点から論点を設定し、データ分析を実施します。結果が出揃い次第、議論フェーズに移行します。`,
     };
   }
 

@@ -293,6 +293,29 @@ export interface IterationRound {
   theme: string;
   evaluation?: QualityEvaluation;
   cardIds: string[];
+  keyFindings: string[];          // Main findings from this iteration
+  discussionHighlights: string[]; // Key discussion points
   startedAt: string;
   endedAt?: string;
+}
+
+/**
+ * Context summary for passing between iterations
+ * This helps agents avoid repeating themselves and build on previous findings
+ */
+export interface IterationContext {
+  originalTopic: string;
+  currentIteration: number;
+  previousIterations: {
+    roundNumber: number;
+    theme: string;
+    findings: string[];
+    evaluation?: {
+      passed: boolean;
+      feedback: string;
+    };
+  }[];
+  cumulativeFindings: string[];    // All unique findings so far
+  areasToDeepen: string[];         // Areas identified for further analysis
+  areasToAvoid: string[];          // Topics already exhausted/covered
 }

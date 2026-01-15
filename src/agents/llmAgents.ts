@@ -135,14 +135,20 @@ export class LLMAgent {
   /**
    * Generate issues based on the analysis topic
    */
-  async generateIssues(topic: string): Promise<Issue[]> {
+  async generateIssues(topic: string, contextPrompt: string = '', originalTopic?: string): Promise<Issue[]> {
+    const contextSection = contextPrompt || '';
+    const originalTopicNote = originalTopic && originalTopic !== topic
+      ? `\n\n※元の分析依頼: 「${originalTopic}」に対する回答を深めることが最終目標です。`
+      : '';
+
     const messages: LLMMessage[] = [
       { role: 'system', content: this.getSystemPrompt() },
       {
         role: 'user',
-        content: `分析テーマ: 「${topic}」
+        content: `分析テーマ: 「${topic}」${originalTopicNote}${contextSection}
 
 このテーマについて、あなたの専門分野から分析すべき論点（Issue）を1-2個提案してください。
+${contextPrompt ? '【重要】前回までの分析で判明した内容と重複しない、新しい視点からの論点を設定してください。' : ''}
 
 以下のJSON形式で回答してください:
 {
@@ -510,20 +516,31 @@ export class LLMChairAgent {
   /**
    * Generate planning message
    */
-  async generatePlanningMessage(topic: string, analysts: Agent[]): Promise<string> {
+  async generatePlanningMessage(
+    topic: string,
+    analysts: Agent[],
+    contextPrompt: string = '',
+    originalTopic?: string,
+    iteration: number = 1
+  ): Promise<string> {
     const analystList = analysts.map(a => `- ${a.name}: ${a.persona}`).join('\n');
+
+    const iterationNote = iteration > 1
+      ? `\n\n【注意】これは${iteration}回目のイテレーションです。元の分析依頼「${originalTopic}」に対する回答を深めることが目的です。前回までの分析結果を踏まえ、より具体的で実行可能な洞察を導いてください。`
+      : '';
 
     const messages: LLMMessage[] = [
       { role: 'system', content: SYSTEM_PROMPTS.chair },
       {
         role: 'user',
-        content: `分析テーマ「${topic}」について議会を開始します。
+        content: `分析テーマ「${topic}」について議会を${iteration > 1 ? '再開' : '開始'}します。${iterationNote}${contextPrompt}
 
 参加アナリスト:
 ${analystList}
 
-議会の開始宣言と、各アナリストへの期待を3-4文で述べてください。
-「【議会開始】」で始めてください。`,
+議会の${iteration > 1 ? '再開' : '開始'}宣言と、各アナリストへの期待を3-4文で述べてください。
+${iteration > 1 ? '前回までの分析を踏まえて、今回のイテレーションで特に深掘りすべき点を明確に指示してください。' : ''}
+「【議会${iteration > 1 ? '再開' : '開始'}】」で始めてください。`,
       },
     ];
 
@@ -531,19 +548,20 @@ ${analystList}
       const response = await this.client.chat(messages, { temperature: 0.7 });
       return response.content;
     } catch (error) {
-      return `【議会開始】\n分析テーマ「${topic}」について議会を開始します。各アナリストは専門の視点から分析を行ってください。`;
+      return `【議会${iteration > 1 ? '再開' : '開始'}】\n分析テーマ「${topic}」について議会を${iteration > 1 ? '再開' : '開始'}します。各アナリストは専門の視点から分析を行ってください。`;
     }
   }
 
   /**
-   * Generate final analysis story
+   * Generate final analysis story with iteration evolution
    */
   async generateFinalReport(
     topic: string,
     cards: EvidenceCard[],
     _issues: Issue[],
     messages: Message[],
-    agents: Agent[]
+    agents: Agent[],
+    iterationHistory: { roundNumber: number; theme: string; keyFindings: string[]; evaluation?: { scores: { specificity: number; novelty: number; actionClarity: number }; passed: boolean; feedback: string } }[] = []
   ): Promise<{
     analysis_story: string;
     key_findings: string[];
@@ -558,12 +576,30 @@ ${analystList}
       .map(m => `- ${m.content.substring(0, 100)}...`)
       .join('\n');
 
+    // Build iteration history summary
+    let iterationSummary = '';
+    if (iterationHistory.length > 1) {
+      iterationSummary = '\n【イテレーション履歴】\n';
+      iterationHistory.forEach((round) => {
+        iterationSummary += `▼ イテレーション${round.roundNumber}: ${round.theme}\n`;
+        if (round.keyFindings.length > 0) {
+          iterationSummary += `  発見: ${round.keyFindings.slice(0, 2).join('; ')}\n`;
+        }
+        if (round.evaluation) {
+          iterationSummary += `  評価: 具体性${round.evaluation.scores.specificity}/5, 新規性${round.evaluation.scores.novelty}/5, アクション明瞭さ${round.evaluation.scores.actionClarity}/5\n`;
+          if (!round.evaluation.passed) {
+            iterationSummary += `  改善点: ${round.evaluation.feedback}\n`;
+          }
+        }
+      });
+    }
+
     const llmMessages: LLMMessage[] = [
       { role: 'system', content: SYSTEM_PROMPTS.chair },
       {
         role: 'user',
-        content: `分析テーマ「${topic}」の議会が終了しました。
-
+        content: `分析テーマ「${topic}」の議会が終了しました。${iterationHistory.length > 1 ? `${iterationHistory.length}回のイテレーションを経て分析を深めました。` : ''}
+${iterationSummary}
 【エビデンスカード一覧】
 ${cardSummaries}
 
@@ -574,21 +610,23 @@ ${discussionHighlights || 'なし'}
 
 JSON形式で回答:
 {
-  "analysis_story": "分析ストーリー（マークダウン形式、500-800文字程度）",
-  "key_findings": ["主要な発見1", "主要な発見2", "主要な発見3"]
+  "analysis_story": "分析ストーリー（マークダウン形式、800-1200文字程度）",
+  "key_findings": ["主要な発見1", "主要な発見2", "主要な発見3", "主要な発見4", "主要な発見5"]
 }
 
-analysis_storyには:
-- # タイトル
-- ## 概要
-- ## 主要な発見
-- ## 結論と推奨事項
-を含めてください。`,
+analysis_storyには以下を含めてください:
+- # タイトル（元のお題に対する回答として）
+- ## 概要（分析の目的と範囲）
+${iterationHistory.length > 1 ? '- ## イテレーションによる分析進化（各イテレーションでどう洞察が深まったか）' : ''}
+- ## 主要な発見（具体的なデータと共に）
+- ## 結論と推奨事項（具体的で実行可能なアクション）
+
+【重要】元のお題「${topic}」に対する明確な回答となるようにまとめてください。`,
       },
     ];
 
     try {
-      const response = await this.client.chat(llmMessages, { temperature: 0.6, maxTokens: 2048 });
+      const response = await this.client.chat(llmMessages, { temperature: 0.6, maxTokens: 3000 });
       const jsonMatch = response.content.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         throw new Error('JSON not found');
@@ -597,9 +635,15 @@ analysis_storyには:
       return JSON.parse(jsonMatch[0]);
     } catch (error) {
       console.error('[LLMChairAgent] Error generating report:', error);
+
+      // Generate a more detailed fallback report
+      const iterationSection = iterationHistory.length > 1
+        ? `\n\n## イテレーションによる分析進化\n\n本分析は${iterationHistory.length}回のイテレーションを経て深化しました。\n\n${iterationHistory.map(r => `### イテレーション${r.roundNumber}: ${r.theme}\n${r.keyFindings.slice(0, 2).map(f => `- ${f}`).join('\n')}`).join('\n\n')}`
+        : '';
+
       return {
-        analysis_story: `# 分析レポート: ${topic}\n\n## 概要\n分析議会にて${cards.length}件のエビデンスが収集されました。\n\n## 主要な発見\n${cards.map(c => `- ${c.claim}`).join('\n')}\n\n## 結論\n詳細な分析により、有益な洞察が得られました。`,
-        key_findings: cards.slice(0, 3).map(c => c.claim),
+        analysis_story: `# 分析レポート: ${topic}\n\n## 概要\n分析議会にて${cards.length}件のエビデンスが収集されました。${iterationHistory.length > 1 ? `${iterationHistory.length}回のイテレーションを経て分析を深めました。` : ''}${iterationSection}\n\n## 主要な発見\n${cards.map(c => `- ${c.claim}`).join('\n')}\n\n## 結論と推奨事項\n詳細な分析により、有益な洞察が得られました。具体的なアクションの検討を推奨します。`,
+        key_findings: cards.slice(0, 5).map(c => c.claim),
       };
     }
   }

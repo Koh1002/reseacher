@@ -2,12 +2,131 @@
 // Workflow State Machine & Orchestration
 // =============================================
 
-import type { WorkflowState, AnalysisReport, Message, DataSchema, QualityEvaluation, IterationRound } from '../types';
+import type { WorkflowState, AnalysisReport, Message, DataSchema, QualityEvaluation, IterationRound, IterationContext, CouncilSession, EvidenceCard } from '../types';
 import { useCouncilStore } from '../store/councilStore';
 import { DemoAgent, DemoChairAgent } from './demoAgents';
 import { LLMAgent, LLMChairAgent, executeAnalysisQueries } from './llmAgents';
 import { LLMClient, getAvailableProviders, type LLMProvider } from '../utils/llmClient';
 import { loadCSV, initDuckDB, tableExists, generateDynamicQueries, ANALYSIS_QUERIES } from '../utils/duckdb';
+
+/**
+ * Build iteration context from session history
+ * This context helps agents avoid repeating themselves and build on previous findings
+ */
+function buildIterationContext(session: CouncilSession): IterationContext {
+  const previousIterations = session.iterationHistory.map((round) => {
+    // Get cards from this iteration
+    const roundCards = session.cards.filter((c) => round.cardIds.includes(c.id));
+    const findings = roundCards.map((c) => c.claim);
+
+    return {
+      roundNumber: round.roundNumber,
+      theme: round.theme,
+      findings: [...findings, ...round.keyFindings],
+      evaluation: round.evaluation ? {
+        passed: round.evaluation.passed,
+        feedback: round.evaluation.feedback,
+      } : undefined,
+    };
+  });
+
+  // Collect all unique findings
+  const allFindings = previousIterations.flatMap((r) => r.findings);
+  const cumulativeFindings = [...new Set(allFindings)];
+
+  // Identify areas to deepen (from failed evaluations)
+  const areasToDeepen: string[] = [];
+  previousIterations.forEach((r) => {
+    if (r.evaluation && !r.evaluation.passed) {
+      // Extract suggestions from feedback
+      areasToDeepen.push(r.evaluation.feedback);
+    }
+  });
+
+  // Areas to avoid (topics fully covered in previous iterations)
+  const areasToAvoid = previousIterations
+    .filter((r) => r.evaluation?.passed)
+    .map((r) => r.theme);
+
+  return {
+    originalTopic: session.originalTopic,
+    currentIteration: session.iteration,
+    previousIterations,
+    cumulativeFindings,
+    areasToDeepen,
+    areasToAvoid,
+  };
+}
+
+/**
+ * Format iteration context as a prompt section
+ */
+function formatContextForPrompt(context: IterationContext): string {
+  if (context.currentIteration === 1) {
+    return '';
+  }
+
+  let contextText = `\n\n【前回までの分析コンテキスト】\n`;
+  contextText += `元の分析テーマ: 「${context.originalTopic}」\n`;
+  contextText += `現在のイテレーション: ${context.currentIteration}回目\n\n`;
+
+  if (context.previousIterations.length > 0) {
+    contextText += `【過去のイテレーション履歴】\n`;
+    context.previousIterations.forEach((iter) => {
+      contextText += `\n▼ イテレーション${iter.roundNumber}: ${iter.theme}\n`;
+      if (iter.findings.length > 0) {
+        contextText += `  主な発見:\n`;
+        iter.findings.slice(0, 3).forEach((f) => {
+          contextText += `  - ${f}\n`;
+        });
+      }
+      if (iter.evaluation) {
+        contextText += `  評価: ${iter.evaluation.passed ? '合格' : '要改善'}\n`;
+        if (!iter.evaluation.passed) {
+          contextText += `  フィードバック: ${iter.evaluation.feedback}\n`;
+        }
+      }
+    });
+  }
+
+  if (context.cumulativeFindings.length > 0) {
+    contextText += `\n【既に判明した事実（繰り返し禁止）】\n`;
+    context.cumulativeFindings.slice(0, 5).forEach((f) => {
+      contextText += `- ${f}\n`;
+    });
+  }
+
+  if (context.areasToDeepen.length > 0) {
+    contextText += `\n【深掘りすべきエリア】\n`;
+    context.areasToDeepen.forEach((a) => {
+      contextText += `- ${a}\n`;
+    });
+  }
+
+  contextText += `\n【重要】前回までの発見を繰り返さず、元テーマ「${context.originalTopic}」に対する答えを深めるような新しい視点で分析してください。\n`;
+
+  return contextText;
+}
+
+/**
+ * Extract key findings from cards for iteration summary
+ */
+function extractKeyFindings(cards: EvidenceCard[]): string[] {
+  return cards
+    .filter((c) => c.confidence !== 'low')
+    .map((c) => c.claim)
+    .slice(0, 5);
+}
+
+/**
+ * Extract discussion highlights from messages
+ */
+function extractDiscussionHighlights(messages: Message[]): string[] {
+  return messages
+    .filter((m) => m.type === 'critique' || m.type === 'question' || m.type === 'decision')
+    .map((m) => m.content.substring(0, 100))
+    .slice(-5);
+}
 
 // Get base path for assets
 const BASE_PATH = import.meta.env.BASE_URL || '/';
@@ -26,6 +145,7 @@ export class WorkflowOrchestrator {
   private llmClients: Map<string, LLMClient> = new Map();
   private dataSchema: DataSchema | null = null;
   private dynamicQueries: Record<string, string> | null = null;
+  private iterationContext: IterationContext | null = null;
 
   /**
    * Initialize database with sample data or use BYD data
@@ -185,9 +305,14 @@ export class WorkflowOrchestrator {
         roundNumber: 1,
         theme: topic,
         cardIds: [],
+        keyFindings: [],
+        discussionHighlights: [],
         startedAt: new Date().toISOString(),
       };
       store.addIterationRound(initialRound);
+
+      // Initialize iteration context
+      this.iterationContext = null;
 
       // Initialize LLM clients
       this.initializeLLMClients();
@@ -288,6 +413,10 @@ export class WorkflowOrchestrator {
     const chair = session.agents.find((a) => a.role === 'chair')!;
     const analysts = session.agents.filter((a) => a.role !== 'chair');
 
+    // Build iteration context for subsequent phases
+    this.iterationContext = buildIterationContext(session);
+    const contextPrompt = formatContextForPrompt(this.iterationContext);
+
     // Update chair status
     store.setAgentStatus(chair.id, 'planning');
     store.setAgentProgress(chair.id, 50);
@@ -298,14 +427,14 @@ export class WorkflowOrchestrator {
       const client = this.getClientForAgent(chair.id);
       if (client) {
         const chairAgent = new LLMChairAgent(chair, client);
-        planMessage = await chairAgent.generatePlanningMessage(session.topic, analysts);
+        planMessage = await chairAgent.generatePlanningMessage(session.topic, analysts, contextPrompt, session.originalTopic, session.iteration);
       } else {
         const demoChair = new DemoChairAgent(chair);
-        planMessage = demoChair.generatePlanningMessage(session.topic, analysts).content;
+        planMessage = demoChair.generatePlanningMessage(session.topic, analysts, session.iteration).content;
       }
     } else {
       const demoChair = new DemoChairAgent(chair);
-      planMessage = demoChair.generatePlanningMessage(session.topic, analysts).content;
+      planMessage = demoChair.generatePlanningMessage(session.topic, analysts, session.iteration).content;
     }
 
     store.addMessage({
@@ -330,6 +459,9 @@ export class WorkflowOrchestrator {
     const session = store.session!;
     const analysts = session.agents.filter((a) => a.role !== 'chair');
 
+    // Get context for this iteration
+    const contextPrompt = this.iterationContext ? formatContextForPrompt(this.iterationContext) : '';
+
     for (const analyst of analysts) {
       store.setAgentStatus(analyst.id, 'planning');
       store.setAgentProgress(analyst.id, 30);
@@ -340,14 +472,14 @@ export class WorkflowOrchestrator {
         const client = this.getClientForAgent(analyst.id);
         if (client) {
           const llmAgent = new LLMAgent(analyst, client);
-          issues = await llmAgent.generateIssues(session.topic);
+          issues = await llmAgent.generateIssues(session.topic, contextPrompt, session.originalTopic);
         } else {
           const demoAgent = new DemoAgent(analyst);
-          issues = await demoAgent.generateIssues(session.topic);
+          issues = await demoAgent.generateIssues(session.topic, session.iteration);
         }
       } else {
         const demoAgent = new DemoAgent(analyst);
-        issues = await demoAgent.generateIssues(session.topic);
+        issues = await demoAgent.generateIssues(session.topic, session.iteration);
       }
 
       for (const issue of issues) {
@@ -757,9 +889,16 @@ export class WorkflowOrchestrator {
 
     store.setQualityEvaluation(evaluation);
 
-    // Update current iteration round with evaluation
+    // Extract findings and highlights for this iteration
+    const keyFindings = extractKeyFindings(iterationCards);
+    const discussionHighlights = extractDiscussionHighlights(session.messages);
+
+    // Update current iteration round with evaluation and findings
     store.updateIterationRound(currentIteration, {
       evaluation,
+      keyFindings,
+      discussionHighlights,
+      cardIds: iterationCards.map((c) => c.id),
       endedAt: new Date().toISOString(),
     });
 
@@ -795,6 +934,10 @@ export class WorkflowOrchestrator {
     cards: { claim: string; metrics: { name: string; value: number | string; unit?: string }[]; confidence: string }[],
     messages: Message[]
   ): Promise<QualityEvaluation> {
+    const store = useCouncilStore.getState();
+    const session = store.session!;
+    const originalTopic = session.originalTopic;
+
     const cardSummary = cards.map((c) => `- ${c.claim} (信頼度: ${c.confidence})`).join('\n');
     const discussionHighlights = messages
       .filter((m) => m.type === 'critique' || m.type === 'question' || m.type === 'support')
@@ -804,7 +947,10 @@ export class WorkflowOrchestrator {
 
     const prompt = `あなたは分析議会の議長です。以下の分析結果を評価してください。
 
-【分析テーマ】
+【元の分析依頼（最終的に答えるべき問い）】
+${originalTopic}
+
+【現在のイテレーションテーマ】
 ${topic}
 
 【エビデンスカード】
@@ -815,14 +961,19 @@ ${discussionHighlights || 'なし'}
 
 以下の3つの観点で1-5の点数をつけ、JSON形式で回答してください：
 
-1. 具体性 (specificity): 分析結果が具体的で実行可能か
-2. 新規性 (novelty): 当たり前でない新しい発見があるか
-3. アクション明瞭さ (actionClarity): 次のアクションが明確に示されているか
+1. 具体性 (specificity): 分析結果が具体的で実行可能か（数値・データに基づいているか）
+2. 新規性 (novelty): 当たり前でない新しい発見があるか（「売上は増えている」程度では不十分）
+3. アクション明瞭さ (actionClarity): 元の問い「${originalTopic}」に対する具体的なアクションが示されているか
 
 評価基準：
 - 1-2点: 不十分、再分析が必要
 - 3点: 最低限の基準を満たす
 - 4-5点: 優れている
+
+【重要】再分析が必要な場合のsuggestedThemeは：
+- 元の問い「${originalTopic}」に対する回答を深めるための深堀りテーマであること
+- テーマを完全に置き換えるのではなく、元テーマの「なぜ？」「どうすれば？」を掘り下げること
+- 例: 「${originalTopic}の要因分析」「${originalTopic}の具体的施策検討」など
 
 JSON形式:
 {
@@ -830,7 +981,7 @@ JSON形式:
   "novelty": 数値(1-5),
   "actionClarity": 数値(1-5),
   "feedback": "評価の説明（2-3文）",
-  "suggestedTheme": "再分析が必要な場合の新テーマ（任意）"
+  "suggestedTheme": "再分析が必要な場合、元テーマに紐づいた深堀りテーマ（任意）"
 }`;
 
     try {
@@ -871,6 +1022,10 @@ JSON形式:
     _cards: { claim: string; confidence: string }[],
     currentIteration: number
   ): QualityEvaluation {
+    const store = useCouncilStore.getState();
+    const session = store.session!;
+    const originalTopic = session.originalTopic;
+
     // Progressively improve scores in later iterations
     const baseScore = Math.min(2 + currentIteration, 4);
     const variance = () => Math.floor(Math.random() * 2) - 1;
@@ -887,21 +1042,22 @@ JSON形式:
       low: [
         '分析結果がまだ表面的です。より具体的なデータポイントと実行可能なアクションが必要です。',
         '新規性のある発見が不足しています。一般的な傾向以上の深い洞察を求めます。',
-        '次のアクションが不明確です。具体的な施策提案が必要です。',
+        `元の問い「${originalTopic}」に対する具体的なアクションが不明確です。`,
       ],
       pass: [
         '分析結果は十分な具体性と実行可能性を持っています。',
         '有意義な発見があり、ビジネス価値のある洞察が得られました。',
-        '次のステップが明確に示されており、実行に移せる状態です。',
+        `「${originalTopic}」に対する明確な回答が得られました。`,
       ],
     };
 
-    const suggestedThemes = [
-      '顧客セグメント別の購買パターン深掘り',
-      '店舗間のベストプラクティス特定',
-      '季節性を考慮した需要予測',
-      '高LTV顧客の行動特性分析',
-      '併買パターンからのクロスセル機会発見',
+    // Suggest themes that deepen the original topic
+    const deepeningThemes = [
+      `「${originalTopic}」の要因分析と改善施策`,
+      `「${originalTopic}」に対する具体的アクションプラン`,
+      `「${originalTopic}」のセグメント別詳細分析`,
+      `「${originalTopic}」の優先順位付けと実行計画`,
+      `「${originalTopic}」の効果検証と追加施策`,
     ];
 
     return {
@@ -910,7 +1066,7 @@ JSON形式:
       feedback: passed
         ? feedbackTemplates.pass[Math.floor(Math.random() * feedbackTemplates.pass.length)]
         : feedbackTemplates.low[Math.floor(Math.random() * feedbackTemplates.low.length)],
-      suggestedTheme: passed ? undefined : suggestedThemes[Math.floor(Math.random() * suggestedThemes.length)],
+      suggestedTheme: passed ? undefined : deepeningThemes[Math.floor(Math.random() * deepeningThemes.length)],
     };
   }
 
@@ -959,16 +1115,24 @@ JSON形式:
     // Increment iteration
     store.incrementIteration();
 
-    // Update topic if suggested
-    if (evaluation?.suggestedTheme) {
-      store.setCurrentTopic(evaluation.suggestedTheme);
-    }
+    // Generate a deepening theme anchored to original topic
+    const newTheme = this.generateDeepeningTheme(
+      session.originalTopic,
+      evaluation?.suggestedTheme,
+      session.iterationHistory,
+      session.iteration + 1
+    );
+
+    // Update topic for this iteration
+    store.setCurrentTopic(newTheme);
 
     // Create new iteration round
     const newRound: IterationRound = {
       roundNumber: session.iteration + 1,
-      theme: evaluation?.suggestedTheme || session.topic,
+      theme: newTheme,
       cardIds: [],
+      keyFindings: [],
+      discussionHighlights: [],
       startedAt: new Date().toISOString(),
     };
     store.addIterationRound(newRound);
@@ -981,10 +1145,48 @@ JSON形式:
       }
     });
 
-    // Clear issues for fresh analysis
-    // Note: We keep cards and messages for historical context
+    // Clear issues for fresh analysis (but keep cards and messages for context)
+    // The iteration context will ensure agents don't repeat themselves
 
     return 'ISSUE_DECOMPOSE';
+  }
+
+  /**
+   * Generate a theme that deepens the original topic rather than replacing it
+   */
+  private generateDeepeningTheme(
+    originalTopic: string,
+    suggestedTheme: string | undefined,
+    history: IterationRound[],
+    nextIteration: number
+  ): string {
+    // If there's a suggestion, frame it as deepening the original topic
+    if (suggestedTheme) {
+      // Avoid completely replacing the theme - anchor it to original
+      if (!suggestedTheme.includes(originalTopic.substring(0, 10))) {
+        return `「${originalTopic}」の深堀り: ${suggestedTheme}`;
+      }
+      return suggestedTheme;
+    }
+
+    // Generate default deepening themes based on iteration number
+    const deepeningAngles = [
+      `「${originalTopic}」の要因分析`,
+      `「${originalTopic}」の具体的アクション検討`,
+      `「${originalTopic}」の実施優先順位付け`,
+      `「${originalTopic}」の効果予測`,
+    ];
+
+    // Pick based on iteration, avoiding already used themes
+    const usedThemes = new Set(history.map((h) => h.theme));
+    for (const angle of deepeningAngles) {
+      if (!usedThemes.has(angle)) {
+        return angle;
+      }
+    }
+
+    // Fallback: numbered deepening
+    return `「${originalTopic}」深堀り分析 ${nextIteration}`;
   }
 
   /**
@@ -1012,11 +1214,12 @@ JSON形式:
       if (client) {
         const llmChair = new LLMChairAgent(chair, client);
         reportData = await llmChair.generateFinalReport(
-          session.topic,
+          session.originalTopic,  // Use original topic for final report
           session.cards,
           session.issues,
           session.messages,
-          session.agents
+          session.agents,
+          session.iterationHistory  // Pass iteration history
         );
       } else {
         reportData = this.generateDemoReport(session);
@@ -1077,33 +1280,75 @@ JSON形式:
   }
 
   /**
-   * Generate demo report
+   * Generate demo report with iteration evolution
    */
   private generateDemoReport(session: {
     topic: string;
-    cards: Array<{ claim: string; method: string; confidence: string }>;
+    originalTopic: string;
+    cards: Array<{ claim: string; method: string; confidence: string; id: string }>;
+    iterationHistory: IterationRound[];
   }): { analysis_story: string; key_findings: string[] } {
     const keyFindings = session.cards
       .filter((c) => c.confidence !== 'low')
       .map((c) => c.claim)
       .slice(0, 5);
 
-    const story = `# 分析レポート: ${session.topic}
+    // Build iteration evolution section
+    let iterationSection = '';
+    if (session.iterationHistory.length > 1) {
+      iterationSection = `\n## イテレーションによる分析進化\n\n`;
+      iterationSection += `本分析は${session.iterationHistory.length}回のイテレーションを経て深化しました。\n\n`;
+
+      session.iterationHistory.forEach((round) => {
+        iterationSection += `### イテレーション${round.roundNumber}: ${round.theme}\n`;
+
+        if (round.keyFindings.length > 0) {
+          iterationSection += `**主な発見:**\n`;
+          round.keyFindings.slice(0, 3).forEach((f) => {
+            iterationSection += `- ${f}\n`;
+          });
+        }
+
+        if (round.evaluation) {
+          const scores = round.evaluation.scores;
+          iterationSection += `**品質評価:** 具体性 ${scores.specificity}/5, 新規性 ${scores.novelty}/5, アクション明瞭さ ${scores.actionClarity}/5\n`;
+          if (!round.evaluation.passed && round.evaluation.feedback) {
+            iterationSection += `**フィードバック:** ${round.evaluation.feedback}\n`;
+          }
+        }
+        iterationSection += '\n';
+      });
+    }
+
+    // Build final recommendations based on iteration insights
+    let recommendationsSection = `## 結論と推奨事項\n\n`;
+    recommendationsSection += `「${session.originalTopic}」に対する分析の結果、以下のアクションを推奨します:\n\n`;
+
+    // Extract action-oriented findings from the last iteration
+    const lastIteration = session.iterationHistory[session.iterationHistory.length - 1];
+    if (lastIteration?.keyFindings.length > 0) {
+      lastIteration.keyFindings.slice(0, 3).forEach((f, i) => {
+        recommendationsSection += `${i + 1}. ${f}に基づく施策の実行\n`;
+      });
+    } else {
+      recommendationsSection += `1. データに基づく顧客セグメント別施策の検討\n`;
+      recommendationsSection += `2. 店舗パフォーマンス差異の要因分析と横展開\n`;
+      recommendationsSection += `3. 併買パターンを活用したクロスセル施策の実施\n`;
+    }
+
+    const story = `# 分析レポート: ${session.originalTopic}
 
 ## 概要
-本分析では、購買履歴データを多角的に分析し、「${session.topic}」に関する知見を導出しました。
+本分析では、購買履歴データを多角的に分析し、「${session.originalTopic}」に関する知見を導出しました。
+${session.iterationHistory.length > 1 ? `${session.iterationHistory.length}回のイテレーションを経て、分析の具体性と実行可能性を高めました。` : ''}
 
 ## 主要な発見
 ${keyFindings.map((f, i) => `${i + 1}. ${f}`).join('\n')}
-
+${iterationSection}
 ## 詳細分析
 各アナリストが専門の視点から分析を実施し、${session.cards.length}件のエビデンスカードを提出しました。議論フェーズでは相互レビューを行い、分析の妥当性を検証しました。
 
-## 結論と推奨事項
-本分析から、以下のアクションを推奨します:
-1. データに基づく顧客セグメント別施策の検討
-2. 店舗パフォーマンス差異の要因分析と横展開
-3. 併買パターンを活用したクロスセル施策の実施`;
+${recommendationsSection}`;
 
     return { analysis_story: story, key_findings: keyFindings };
   }
