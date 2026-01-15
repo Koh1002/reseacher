@@ -2,7 +2,7 @@
 // Main App Component
 // =============================================
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useCouncilStore } from './store/councilStore';
 import { workflowOrchestrator } from './agents/workflow';
@@ -11,6 +11,7 @@ import { TimelinePanel } from './components/TimelinePanel';
 import { CardPanel } from './components/CardPanel';
 import { ReportView } from './components/ReportView';
 import { APIKeyInput } from './components/APIKeyInput';
+import type { DataSchema } from './types';
 
 // Sample analysis topics for quick start
 const SAMPLE_TOPICS = [
@@ -20,16 +21,58 @@ const SAMPLE_TOPICS = [
   '季節変動を考慮した在庫戦略を提案してほしい',
 ];
 
-function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
+function TopicInput({ onStart }: { onStart: (topic: string, dataSchema?: DataSchema) => void }) {
   const [topic, setTopic] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [uploadedSchema, setUploadedSchema] = useState<DataSchema | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const config = useCouncilStore((s) => s.config);
+  const dataMode = useCouncilStore((s) => s.dataMode);
+  const setDataMode = useCouncilStore((s) => s.setDataMode);
+  const setDataSchema = useCouncilStore((s) => s.setDataSchema);
 
   const handleStart = async () => {
     if (!topic.trim()) return;
     setIsLoading(true);
-    await onStart(topic.trim());
+    await onStart(topic.trim(), uploadedSchema || undefined);
     setIsLoading(false);
+  };
+
+  const handleFileUpload = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setUploadError(null);
+    setIsLoading(true);
+
+    try {
+      const text = await file.text();
+
+      // Dynamic import to avoid bundling issues
+      const { initDuckDB, loadCSVFromContent, analyzeDataSchema } = await import('./utils/duckdb');
+
+      await initDuckDB();
+      await loadCSVFromContent('user_data', text);
+      const schema = await analyzeDataSchema('user_data');
+
+      setUploadedSchema(schema);
+      setDataSchema(schema);
+      setDataMode('BYD');
+
+      console.log('[App] Data schema detected:', schema);
+    } catch (error) {
+      console.error('[App] Error uploading file:', error);
+      setUploadError('ファイルの読み込みに失敗しました。CSVファイルであることを確認してください。');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [setDataMode, setDataSchema]);
+
+  const handleClearUpload = () => {
+    setUploadedSchema(null);
+    setDataSchema(null);
+    setDataMode('DEMO');
+    setUploadError(null);
   };
 
   return (
@@ -52,6 +95,91 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
         <APIKeyInput />
       </div>
 
+      {/* Data Mode Toggle */}
+      <div className="bg-white rounded-xl shadow-lg p-6 mb-4">
+        <div className="flex items-center justify-between mb-4">
+          <label className="block text-sm font-medium text-gray-700">
+            データソース
+          </label>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setDataMode('DEMO'); handleClearUpload(); }}
+              className={`px-4 py-2 text-sm rounded-lg transition-colors ${
+                dataMode === 'DEMO'
+                  ? 'bg-blue-600 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              📊 サンプルデータ
+            </button>
+            <button
+              onClick={() => setDataMode('BYD')}
+              className={`px-4 py-2 text-sm rounded-lg transition-colors ${
+                dataMode === 'BYD'
+                  ? 'bg-purple-600 text-white'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+              }`}
+            >
+              📁 BYD (自分のデータ)
+            </button>
+          </div>
+        </div>
+
+        {/* BYD Mode: File Upload */}
+        {dataMode === 'BYD' && (
+          <div className="border-2 border-dashed border-purple-300 rounded-lg p-4 bg-purple-50">
+            {!uploadedSchema ? (
+              <div className="text-center">
+                <p className="text-sm text-gray-600 mb-3">
+                  購買履歴CSVをアップロードしてください
+                </p>
+                <label className="cursor-pointer inline-flex items-center gap-2 px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors">
+                  <span>📤 CSVファイルを選択</span>
+                  <input
+                    type="file"
+                    accept=".csv"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                    disabled={isLoading}
+                  />
+                </label>
+                {uploadError && (
+                  <p className="mt-2 text-sm text-red-600">{uploadError}</p>
+                )}
+                <p className="mt-3 text-xs text-gray-500">
+                  スーパーマーケット・ドラッグストアの購買履歴データに対応。<br/>
+                  列名は自動検出されます。
+                </p>
+              </div>
+            ) : (
+              <div>
+                <div className="flex items-center justify-between mb-3">
+                  <span className="text-sm font-medium text-purple-700">
+                    ✅ データ読み込み完了
+                  </span>
+                  <button
+                    onClick={handleClearUpload}
+                    className="text-sm text-gray-500 hover:text-gray-700"
+                  >
+                    × クリア
+                  </button>
+                </div>
+                <div className="bg-white rounded-lg p-3 text-xs">
+                  <pre className="whitespace-pre-wrap text-gray-700">{uploadedSchema.summary}</pre>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* DEMO Mode Info */}
+        {dataMode === 'DEMO' && (
+          <div className="bg-blue-50 rounded-lg p-3 text-sm text-blue-700">
+            📊 サンプルデータ（生鮮食品スーパーマーケット購買履歴 100,000件）を使用します
+          </div>
+        )}
+      </div>
+
       <div className="bg-white rounded-xl shadow-lg p-6">
         <label className="block text-sm font-medium text-gray-700 mb-2">
           分析テーマを入力してください
@@ -67,10 +195,12 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
         <div className="mt-4">
           <button
             onClick={handleStart}
-            disabled={!topic.trim() || isLoading}
+            disabled={!topic.trim() || isLoading || (dataMode === 'BYD' && !uploadedSchema)}
             className={`w-full py-3 rounded-lg font-semibold text-white transition-colors ${
-              !topic.trim() || isLoading
+              !topic.trim() || isLoading || (dataMode === 'BYD' && !uploadedSchema)
                 ? 'bg-gray-400 cursor-not-allowed'
+                : dataMode === 'BYD'
+                ? 'bg-purple-600 hover:bg-purple-700'
                 : 'bg-blue-600 hover:bg-blue-700'
             }`}
           >
@@ -82,7 +212,7 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
                 >
                   ⏳
                 </motion.span>
-                データ読み込み中...
+                {dataMode === 'BYD' ? 'データ分析中...' : 'データ読み込み中...'}
               </span>
             ) : (
               <span className="flex items-center justify-center gap-2">
@@ -94,6 +224,11 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
                 }`}>
                   {config.mode}モード
                 </span>
+                {dataMode === 'BYD' && (
+                  <span className="px-2 py-0.5 rounded text-xs bg-purple-500/20 text-purple-100">
+                    BYD
+                  </span>
+                )}
               </span>
             )}
           </button>
@@ -117,14 +252,13 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
       </div>
 
       {/* Info cards */}
-      <div className="mt-8 grid grid-cols-2 gap-4">
+      <div className="mt-8 grid grid-cols-3 gap-4">
         <div className={`rounded-lg p-4 shadow ${
           config.mode === 'DEMO' ? 'bg-blue-50 border-2 border-blue-200' : 'bg-white'
         }`}>
           <h3 className="font-semibold text-sm mb-2">📊 DEMOモード</h3>
           <p className="text-xs text-gray-600">
-            ルールベースのエージェントが購買データを分析します。
-            APIキー不要でお試しいただけます。
+            ルールベースのエージェントが分析します。APIキー不要。
           </p>
         </div>
         <div className={`rounded-lg p-4 shadow ${
@@ -133,7 +267,14 @@ function TopicInput({ onStart }: { onStart: (topic: string) => void }) {
           <h3 className="font-semibold text-sm mb-2">🤖 DEVモード</h3>
           <p className="text-xs text-gray-600">
             GPT/Claude/Geminiが実際に分析・議論を行います。
-            APIキーを入力すると自動で切り替わります。
+          </p>
+        </div>
+        <div className={`rounded-lg p-4 shadow ${
+          dataMode === 'BYD' ? 'bg-purple-50 border-2 border-purple-200' : 'bg-white'
+        }`}>
+          <h3 className="font-semibold text-sm mb-2">📁 BYDモード</h3>
+          <p className="text-xs text-gray-600">
+            自分のCSVデータをアップロードして分析できます。
           </p>
         </div>
       </div>
@@ -232,16 +373,21 @@ function CouncilView() {
 
 export default function App() {
   const session = useCouncilStore((s) => s.session);
+  const dataMode = useCouncilStore((s) => s.dataMode);
   const [started, setStarted] = useState(false);
 
-  const handleStart = async (topic: string) => {
+  const handleStart = async (topic: string, dataSchema?: DataSchema) => {
     setStarted(true);
-    await workflowOrchestrator.start(topic);
+    await workflowOrchestrator.start(topic, dataSchema);
   };
 
   if (!started || !session) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-8">
+      <div className={`min-h-screen flex items-center justify-center p-8 ${
+        dataMode === 'BYD'
+          ? 'bg-gradient-to-br from-purple-50 to-indigo-100'
+          : 'bg-gradient-to-br from-blue-50 to-indigo-100'
+      }`}>
         <TopicInput onStart={handleStart} />
       </div>
     );

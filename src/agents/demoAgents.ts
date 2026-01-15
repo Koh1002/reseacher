@@ -148,9 +148,74 @@ function randomChoice<T>(arr: T[]): T {
 }
 
 function assessConfidence(dataPoints: number): Confidence {
-  if (dataPoints < 10) return 'low';
-  if (dataPoints < 50) return 'mid';
+  // dataPoints should be actual transaction count, not aggregated row count
+  if (dataPoints < 100) return 'low';
+  if (dataPoints < 1000) return 'mid';
   return 'high';
+}
+
+/**
+ * Calculate actual transaction count from aggregated query results
+ * Different queries store counts in different fields
+ */
+function calculateActualCount(
+  queryKey: keyof typeof ANALYSIS_QUERIES,
+  results: Record<string, unknown>[]
+): number {
+  if (results.length === 0) return 0;
+
+  switch (queryKey) {
+    case 'totalSales':
+      // Has direct transaction_count
+      return Number(results[0].transaction_count) || 0;
+
+    case 'monthlyTrend':
+    case 'dayOfWeekPattern':
+    case 'salesByCategory':
+      // Sum of transactions field
+      return results.reduce((sum, r) => sum + (Number(r.transactions) || 0), 0);
+
+    case 'storePerformance':
+    case 'salesByStore':
+      // Sum of transactions field
+      return results.reduce((sum, r) => sum + (Number(r.transactions) || 0), 0);
+
+    case 'customerSegments':
+    case 'customerLTV':
+      // Sum of customer_count (this is customer count, use for reference)
+      return results.reduce((sum, r) => sum + (Number(r.customer_count) || 0), 0);
+
+    case 'basketSize':
+      // Sum of transaction_count field
+      return results.reduce((sum, r) => sum + (Number(r.transaction_count) || 0), 0);
+
+    case 'categoryCoPurchase':
+      // Sum of co_occurrence_count
+      return results.reduce((sum, r) => sum + (Number(r.co_occurrence_count) || 0), 0);
+
+    case 'priceRangeAnalysis':
+      // Sum of transaction_count field
+      return results.reduce((sum, r) => sum + (Number(r.transaction_count) || 0), 0);
+
+    case 'topProducts':
+      // Sum of purchase_count field
+      return results.reduce((sum, r) => sum + (Number(r.purchase_count) || 0), 0);
+
+    default:
+      // Fallback: try common field names
+      const firstRow = results[0];
+      if ('transaction_count' in firstRow) {
+        return results.reduce((sum, r) => sum + (Number(r.transaction_count) || 0), 0);
+      }
+      if ('transactions' in firstRow) {
+        return results.reduce((sum, r) => sum + (Number(r.transactions) || 0), 0);
+      }
+      if ('customer_count' in firstRow) {
+        return results.reduce((sum, r) => sum + (Number(r.customer_count) || 0), 0);
+      }
+      // Last resort: return row count (but this is often misleading)
+      return results.length;
+  }
 }
 
 // ============ Demo Agent Implementation ============
@@ -242,7 +307,7 @@ export class DemoAgent {
           to: String(timeframe.end_date).split('T')[0],
         },
         chart_spec: chartSpec,
-        confidence: assessConfidence(results.length),
+        confidence: assessConfidence(calculateActualCount(issueTemplate.queryKey, results)),
         caveats: this.generateCaveats(issueTemplate.queryKey, results),
         created_at: new Date().toISOString(),
       };
@@ -491,8 +556,9 @@ export class DemoAgent {
         break;
 
       default:
-        // Generic: just include count
-        metrics.push({ name: 'データ件数', value: results.length, unit: '件' });
+        // Generic: calculate actual count from query results
+        const actualCount = calculateActualCount(queryKey, results);
+        metrics.push({ name: 'データ件数', value: actualCount.toLocaleString(), unit: '件' });
     }
 
     return metrics;
@@ -611,7 +677,9 @@ export class DemoAgent {
   ): string[] {
     const caveats: string[] = [];
 
-    if (results.length < 10) {
+    // Use actual transaction count, not aggregated row count
+    const actualCount = calculateActualCount(queryKey, results);
+    if (actualCount < 100) {
       caveats.push('サンプルサイズが限定的です。結果の解釈には注意が必要です。');
     }
 

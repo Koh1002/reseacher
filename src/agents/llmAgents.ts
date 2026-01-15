@@ -13,6 +13,58 @@ import { LLMClient, type LLMMessage } from '../utils/llmClient';
 import { executeQuery, ANALYSIS_QUERIES, type AnalysisQueryKey } from '../utils/duckdb';
 import { generateId } from './protocol';
 
+// ============ Helper Functions ============
+
+/**
+ * Calculate actual transaction count from aggregated query results
+ * Different queries store counts in different fields
+ */
+function calculateActualCount(queryKey: string, data: Record<string, unknown>[]): number {
+  if (!data || data.length === 0) return 0;
+
+  switch (queryKey) {
+    case 'totalSales':
+      return Number(data[0].transaction_count) || 0;
+
+    case 'monthlyTrend':
+    case 'dayOfWeekPattern':
+    case 'salesByCategory':
+      return data.reduce((sum, r) => sum + (Number(r.transactions) || 0), 0);
+
+    case 'storePerformance':
+    case 'salesByStore':
+      return data.reduce((sum, r) => sum + (Number(r.transactions) || 0), 0);
+
+    case 'customerSegments':
+    case 'customerLTV':
+      return data.reduce((sum, r) => sum + (Number(r.customer_count) || 0), 0);
+
+    case 'basketSize':
+    case 'priceRangeAnalysis':
+      return data.reduce((sum, r) => sum + (Number(r.transaction_count) || 0), 0);
+
+    case 'categoryCoPurchase':
+      return data.reduce((sum, r) => sum + (Number(r.co_occurrence_count) || 0), 0);
+
+    case 'topProducts':
+      return data.reduce((sum, r) => sum + (Number(r.purchase_count) || 0), 0);
+
+    default:
+      // Try common field names
+      const firstRow = data[0];
+      if ('transaction_count' in firstRow) {
+        return data.reduce((sum, r) => sum + (Number(r.transaction_count) || 0), 0);
+      }
+      if ('transactions' in firstRow) {
+        return data.reduce((sum, r) => sum + (Number(r.transactions) || 0), 0);
+      }
+      if ('customer_count' in firstRow) {
+        return data.reduce((sum, r) => sum + (Number(r.customer_count) || 0), 0);
+      }
+      return data.length;
+  }
+}
+
 // ============ System Prompts ============
 
 const SYSTEM_PROMPTS = {
@@ -262,15 +314,25 @@ ${dataSummary}
       const firstResult = Object.entries(queryResults).find(([, v]) => v && v.length > 0);
       if (firstResult) {
         const [key, data] = firstResult;
-        metrics.push({ name: 'データ件数', value: data.length, unit: '件' });
+        // Use actual count from aggregated results, not row count
+        const actualCount = calculateActualCount(key, data);
+        metrics.push({ name: 'データ件数', value: actualCount.toLocaleString(), unit: '件' });
 
-        // Try to extract a meaningful claim
+        // Try to extract a meaningful claim with actual counts
         if (key === 'monthlyTrend' && data.length > 0) {
-          claim = `${data.length}ヶ月分のトレンドデータを分析しました。`;
+          const totalTransactions = calculateActualCount(key, data);
+          claim = `${data.length}ヶ月分（${totalTransactions.toLocaleString()}件）のトレンドデータを分析しました。`;
         } else if (key === 'storePerformance' && data.length > 0) {
-          claim = `${data.length}店舗のパフォーマンスデータを分析しました。`;
+          const totalTransactions = calculateActualCount(key, data);
+          claim = `${data.length}店舗（${totalTransactions.toLocaleString()}件）のパフォーマンスデータを分析しました。`;
         } else if (key === 'customerSegments' && data.length > 0) {
-          claim = `${data.length}つの顧客セグメントを分析しました。`;
+          const totalCustomers = calculateActualCount(key, data);
+          claim = `${data.length}つの顧客セグメント（${totalCustomers.toLocaleString()}人）を分析しました。`;
+        } else if (key === 'salesByCategory' && data.length > 0) {
+          const totalTransactions = calculateActualCount(key, data);
+          claim = `${data.length}部門（${totalTransactions.toLocaleString()}件）の売上データを分析しました。`;
+        } else if (actualCount > 0) {
+          claim = `${issue.title}の分析を実施しました（${actualCount.toLocaleString()}件のデータ）。`;
         }
       }
     }
@@ -287,8 +349,8 @@ ${dataSummary}
         from: '2024-01-01',
         to: '2024-03-31',
       },
-      confidence: 'low' as const,
-      caveats: ['LLM分析が完了しなかったため、限定的な結果です。'],
+      confidence: 'mid' as const, // Changed from 'low' since we have actual data
+      caveats: ['LLM分析が完了しなかったため、基本的な集計結果のみです。'],
       created_at: new Date().toISOString(),
     };
   }
